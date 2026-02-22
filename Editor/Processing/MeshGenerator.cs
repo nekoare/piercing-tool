@@ -61,6 +61,48 @@ namespace PiercingTool.Editor
                 piercingMesh.bindposes = ComputeBindposes(setup);
             }
 
+            // --- デバッグ情報 ---
+            Debug.Log($"[PiercingTool] ソースメッシュ: 頂点数={sourceMesh.vertexCount}, BlendShape数={sourceMesh.blendShapeCount}");
+            Debug.Log($"[PiercingTool] ピアスメッシュ: 頂点数={piercingMesh.vertexCount}, BlendShape数={piercingMesh.blendShapeCount}");
+            Debug.Log($"[PiercingTool] ピアス原点: {piercingOrigin}");
+            Debug.Log($"[PiercingTool] ソースTransform: pos={setup.targetRenderer.transform.position}, rot={setup.targetRenderer.transform.rotation.eulerAngles}, scale={setup.targetRenderer.transform.lossyScale}");
+            Debug.Log($"[PiercingTool] ピアスTransform: pos={setup.transform.position}, rot={setup.transform.rotation.eulerAngles}, scale={setup.transform.lossyScale}");
+
+            if (setup.mode == PiercingMode.Single)
+            {
+                var refIndices = setup.referenceVertices;
+                Debug.Log($"[PiercingTool] 参照頂点インデックス: [{string.Join(", ", refIndices)}]");
+                var sv = sourceMesh.vertices;
+                foreach (int idx in refIndices)
+                {
+                    if (idx < sv.Length)
+                        Debug.Log($"[PiercingTool]   頂点#{idx} ベース位置: {sv[idx]}");
+                }
+
+                // 最初のBlendShapeのデルタをログ出力
+                if (sourceMesh.blendShapeCount > 0)
+                {
+                    var testDeltas = new Vector3[sourceMesh.vertexCount];
+                    var testNormals = new Vector3[sourceMesh.vertexCount];
+                    var testTangents = new Vector3[sourceMesh.vertexCount];
+                    for (int si = 0; si < Mathf.Min(3, sourceMesh.blendShapeCount); si++)
+                    {
+                        string name = sourceMesh.GetBlendShapeName(si);
+                        sourceMesh.GetBlendShapeFrameVertices(si, 0, testDeltas, testNormals, testTangents);
+                        float maxDelta = 0;
+                        foreach (int idx in refIndices)
+                        {
+                            if (idx < testDeltas.Length)
+                            {
+                                float mag = testDeltas[idx].magnitude;
+                                if (mag > maxDelta) maxDelta = mag;
+                                Debug.Log($"[PiercingTool]   BlendShape '{name}' 頂点#{idx} デルタ: {testDeltas[idx]} (magnitude: {mag:F6})");
+                            }
+                        }
+                    }
+                }
+            }
+
             Debug.Log($"[PiercingTool] {transferred.Count}個のBlendShapeを転写しました: " +
                       string.Join(", ", transferred));
             return piercingMesh;
