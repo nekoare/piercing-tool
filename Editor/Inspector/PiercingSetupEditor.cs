@@ -67,7 +67,11 @@ namespace PiercingTool.Editor
                     try
                     {
                         var mesh = MeshGenerator.Generate(setup);
-                        MeshGenerator.SaveMeshAsset(mesh);
+                        var path = MeshGenerator.SaveMeshAsset(mesh);
+                        if (path != null)
+                        {
+                            ApplyGeneratedMesh(setup, mesh);
+                        }
                     }
                     catch (System.Exception e)
                     {
@@ -195,6 +199,28 @@ namespace PiercingTool.Editor
                 return setup.referenceVertices.Count > 0;
             else
                 return setup.pointAVertices.Count > 0 && setup.pointBVertices.Count > 0;
+        }
+
+        /// <summary>
+        /// 生成されたメッシュをSkinnedMeshRendererに適用し、bones/rootBoneも自動設定する。
+        /// </summary>
+        private void ApplyGeneratedMesh(PiercingSetup setup, Mesh mesh)
+        {
+            var smr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (smr != null)
+            {
+                Undo.RecordObject(smr, "Apply generated piercing mesh");
+                smr.sharedMesh = mesh;
+
+                if (!setup.skipBoneWeightTransfer)
+                {
+                    smr.bones = setup.targetRenderer.bones;
+                    smr.rootBone = setup.targetRenderer.rootBone;
+                }
+
+                EditorUtility.SetDirty(smr);
+                Debug.Log("[PiercingTool] SkinnedMeshRendererにメッシュ・bones・rootBoneを自動設定しました。");
+            }
         }
 
         private void DrawValidationMessages(PiercingSetup setup)

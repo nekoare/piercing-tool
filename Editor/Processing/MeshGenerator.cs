@@ -51,10 +51,12 @@ namespace PiercingTool.Editor
                     piercingOrigin);
             }
 
-            // ボーンウェイト転写
+            // ボーンウェイト・bindpose転写
             if (!setup.skipBoneWeightTransfer)
             {
                 TransferBoneWeights(setup, sourceMesh, piercingMesh);
+                // ソースメッシュのbindposesをコピー（ボーンインデックスが同じなので全部必要）
+                piercingMesh.bindposes = sourceMesh.bindposes;
             }
 
             Debug.Log($"[PiercingTool] {transferred.Count}個のBlendShapeを転写しました: " +
