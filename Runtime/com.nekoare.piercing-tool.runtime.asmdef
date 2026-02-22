@@ -1,6 +1,14 @@
 {
   "name": "com.nekoare.piercing-tool.runtime",
   "rootNamespace": "PiercingTool",
-  "references": [],
-  "autoReferenced": true
+  "references": [
+    "VRC.SDKBase"
+  ],
+  "autoReferenced": true,
+  "versionDefines": [
+    {
+      "name": "com.vrchat.base",
+      "define": "PIERCING_VRCSDK"
+    }
+  ]
 }
