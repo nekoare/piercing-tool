@@ -51,12 +51,14 @@ namespace PiercingTool.Editor
                     piercingOrigin);
             }
 
-            // ボーンウェイト・bindpose転写
+            // ボーンウェイト・bindpose設定
             if (!setup.skipBoneWeightTransfer)
             {
                 TransferBoneWeights(setup, sourceMesh, piercingMesh);
-                // ソースメッシュのbindposesをコピー（ボーンインデックスが同じなので全部必要）
-                piercingMesh.bindposes = sourceMesh.bindposes;
+                // ピアスメッシュの座標系に合ったbindposeを計算する
+                // bindpose[i] = bone[i].worldToLocal * mesh.localToWorld
+                // （ソースのbindposeはソースメッシュの座標系用なのでコピー不可）
+                piercingMesh.bindposes = ComputeBindposes(setup);
             }
 
             Debug.Log($"[PiercingTool] {transferred.Count}個のBlendShapeを転写しました: " +
@@ -125,6 +127,28 @@ namespace PiercingTool.Editor
                     setup.pointBVertices.ToArray(),
                     tValues);
             }
+        }
+
+        /// <summary>
+        /// ピアスメッシュの座標系に合ったbindposeを計算する。
+        /// bindpose[i] = bone[i].worldToLocal * piercingTransform.localToWorld
+        /// これにより「ピアスのローカル頂点 → ワールド → ボーンローカル」の変換が正しく行われる。
+        /// </summary>
+        private static Matrix4x4[] ComputeBindposes(PiercingSetup setup)
+        {
+            var bones = setup.targetRenderer.bones;
+            var piercingLocalToWorld = setup.transform.localToWorldMatrix;
+            var bindposes = new Matrix4x4[bones.Length];
+
+            for (int i = 0; i < bones.Length; i++)
+            {
+                if (bones[i] != null)
+                    bindposes[i] = bones[i].worldToLocalMatrix * piercingLocalToWorld;
+                else
+                    bindposes[i] = Matrix4x4.identity;
+            }
+
+            return bindposes;
         }
 
         private static Vector3 ComputePiercingOrigin(Mesh mesh)
