@@ -248,7 +248,60 @@ namespace PiercingTool.Editor
 
             EditorUtility.SetDirty(smr);
             Debug.Log("[PiercingTool] SkinnedMeshRendererにメッシュ・bones・rootBoneを自動設定しました。");
+
+#if PIERCING_MODULAR_AVATAR
+            SetupBlendShapeSync(setup, mesh);
+#endif
         }
+
+#if PIERCING_MODULAR_AVATAR
+        private void SetupBlendShapeSync(PiercingSetup setup, Mesh piercingMesh)
+        {
+            var sync = setup.gameObject
+                .GetComponent<nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>();
+
+            if (sync == null)
+                sync = Undo.AddComponent<nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>(
+                    setup.gameObject);
+            else
+                Undo.RecordObject(sync, "Setup BlendShape Sync");
+
+            // 既存のBindingsをクリアして再設定（再生成時に重複しないように）
+            sync.Bindings.Clear();
+
+            for (int i = 0; i < piercingMesh.blendShapeCount; i++)
+            {
+                string shapeName = piercingMesh.GetBlendShapeName(i);
+                var binding = new nadena.dev.modular_avatar.core.BlendshapeBinding
+                {
+                    ReferenceMesh = new nadena.dev.modular_avatar.core.AvatarObjectReference
+                    {
+                        referencePath = GetRelativePath(
+                            setup.targetRenderer.transform,
+                            setup.transform.root)
+                    },
+                    Blendshape = shapeName,
+                    LocalBlendshape = shapeName
+                };
+                sync.Bindings.Add(binding);
+            }
+
+            EditorUtility.SetDirty(sync);
+            Debug.Log($"[PiercingTool] MA BlendShape Syncを設定しました（{piercingMesh.blendShapeCount}個のBlendShape）。");
+        }
+
+        private static string GetRelativePath(Transform target, Transform root)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            var current = target;
+            while (current != null && current != root)
+            {
+                parts.Insert(0, current.name);
+                current = current.parent;
+            }
+            return string.Join("/", parts);
+        }
+#endif
 
         private void DrawValidationMessages(PiercingSetup setup)
         {
