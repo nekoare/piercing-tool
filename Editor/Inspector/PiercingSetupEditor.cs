@@ -203,24 +203,51 @@ namespace PiercingTool.Editor
 
         /// <summary>
         /// 生成されたメッシュをSkinnedMeshRendererに適用し、bones/rootBoneも自動設定する。
+        /// MeshFilter+MeshRendererの場合は自動でSkinnedMeshRendererに変換する。
         /// </summary>
         private void ApplyGeneratedMesh(PiercingSetup setup, Mesh mesh)
         {
             var smr = setup.GetComponent<SkinnedMeshRenderer>();
-            if (smr != null)
+
+            // MeshFilter+MeshRenderer → SkinnedMeshRendererに変換
+            if (smr == null)
+            {
+                var mf = setup.GetComponent<MeshFilter>();
+                var mr = setup.GetComponent<MeshRenderer>();
+
+                // 変換前のマテリアルを保持
+                Material[] materials = null;
+                if (mr != null)
+                    materials = mr.sharedMaterials;
+
+                // MeshFilter, MeshRendererを削除
+                if (mf != null) Undo.DestroyObjectImmediate(mf);
+                if (mr != null) Undo.DestroyObjectImmediate(mr);
+
+                // SkinnedMeshRendererを追加
+                smr = Undo.AddComponent<SkinnedMeshRenderer>(setup.gameObject);
+
+                // マテリアルを復元
+                if (materials != null)
+                    smr.sharedMaterials = materials;
+
+                Debug.Log("[PiercingTool] MeshFilter+MeshRenderer → SkinnedMeshRendererに変換しました。");
+            }
+            else
             {
                 Undo.RecordObject(smr, "Apply generated piercing mesh");
-                smr.sharedMesh = mesh;
-
-                if (!setup.skipBoneWeightTransfer)
-                {
-                    smr.bones = setup.targetRenderer.bones;
-                    smr.rootBone = setup.targetRenderer.rootBone;
-                }
-
-                EditorUtility.SetDirty(smr);
-                Debug.Log("[PiercingTool] SkinnedMeshRendererにメッシュ・bones・rootBoneを自動設定しました。");
             }
+
+            smr.sharedMesh = mesh;
+
+            if (!setup.skipBoneWeightTransfer)
+            {
+                smr.bones = setup.targetRenderer.bones;
+                smr.rootBone = setup.targetRenderer.rootBone;
+            }
+
+            EditorUtility.SetDirty(smr);
+            Debug.Log("[PiercingTool] SkinnedMeshRendererにメッシュ・bones・rootBoneを自動設定しました。");
         }
 
         private void DrawValidationMessages(PiercingSetup setup)
