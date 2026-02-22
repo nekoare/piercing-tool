@@ -1,0 +1,6 @@
+{
+  "name": "com.nekoare.piercing-tool.runtime",
+  "rootNamespace": "PiercingTool",
+  "references": [],
+  "autoReferenced": true
+}

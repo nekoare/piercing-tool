@@ -1,0 +1,11 @@
+{
+  "name": "com.nekoare.piercing-tool",
+  "version": "0.1.0",
+  "displayName": "ピアス追従ツール",
+  "description": "シェイプキーで変形する部位にピアスメッシュを追従させるツール",
+  "unity": "2022.3",
+  "author": {
+    "name": "nekoare",
+    "url": "https://neko-to-same.booth.pm/"
+  }
+}

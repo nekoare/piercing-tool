@@ -1,0 +1,19 @@
+{
+  "name": "com.nekoare.piercing-tool.editor",
+  "rootNamespace": "PiercingTool.Editor",
+  "references": [
+    "com.nekoare.piercing-tool.runtime"
+  ],
+  "includePlatforms": ["Editor"],
+  "autoReferenced": false,
+  "versionDefines": [
+    {
+      "name": "nadena.dev.ndmf",
+      "define": "PIERCING_NDMF"
+    },
+    {
+      "name": "nadena.dev.modular-avatar",
+      "define": "PIERCING_MODULAR_AVATAR"
+    }
+  ]
+}
