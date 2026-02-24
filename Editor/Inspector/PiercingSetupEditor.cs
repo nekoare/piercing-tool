@@ -206,6 +206,16 @@ namespace PiercingTool.Editor
 
             Undo.RecordObject(setup, "Save piercing position");
 
+            // 参照頂点が未指定の場合、現在のBlendShape状態で自動選択して保存
+            // （ビルド時のBlendShape状態に依存しないようにするため）
+            if (setup.mode == PiercingMode.Single && setup.referenceVertices.Count == 0)
+            {
+                var autoSelected = MeshGenerator.FindClosestTriangleVertices(
+                    setup.targetRenderer, setup.transform.position);
+                setup.referenceVertices.AddRange(autoSelected);
+                Debug.Log($"[PiercingTool] 参照頂点を自動選択しました: {string.Join(", ", autoSelected)}");
+            }
+
             // BlendShape weightsスナップショットを保存
             var smr = setup.targetRenderer;
             int count = smr.sharedMesh != null ? smr.sharedMesh.blendShapeCount : 0;

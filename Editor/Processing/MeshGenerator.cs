@@ -347,7 +347,7 @@ namespace PiercingTool.Editor
         /// ピアスのワールド位置に最も近いソースメッシュ上の三角面の3頂点インデックスを返す。
         /// BakeMeshで現在のBlendShape/ボーン状態を反映した変形後メッシュから最近傍を検索する。
         /// </summary>
-        private static int[] FindClosestTriangleVertices(SkinnedMeshRenderer renderer, Vector3 piercingWorldPos)
+        public static int[] FindClosestTriangleVertices(SkinnedMeshRenderer renderer, Vector3 piercingWorldPos)
         {
             var bakedMesh = new Mesh();
             renderer.BakeMesh(bakedMesh);
