@@ -62,6 +62,10 @@ namespace PiercingTool.Editor
 #if PIERCING_MODULAR_AVATAR
             SetupBlendShapeSync(setup, mesh);
 #endif
+
+#if PIERCING_VRCSDK && PIERCING_MODULAR_AVATAR
+            VisemeAnimatorGenerator.Setup(setup, mesh);
+#endif
         }
 
 #if PIERCING_MODULAR_AVATAR
