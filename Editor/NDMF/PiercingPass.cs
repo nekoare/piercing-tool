@@ -30,18 +30,32 @@ namespace PiercingTool.Editor
         {
             var mesh = MeshGenerator.Generate(setup);
 
-            // 生成したメッシュをRendererに適用
+            // MeshFilter+MeshRenderer → SkinnedMeshRenderer に変換
             var smr = setup.GetComponent<SkinnedMeshRenderer>();
-            if (smr != null)
+            if (smr == null)
             {
-                smr.sharedMesh = mesh;
+                var mf = setup.GetComponent<MeshFilter>();
+                var mr = setup.GetComponent<MeshRenderer>();
 
-                // ボーン情報をターゲットRendererから設定
-                if (!setup.skipBoneWeightTransfer)
-                {
-                    smr.bones = setup.targetRenderer.bones;
-                    smr.rootBone = setup.targetRenderer.rootBone;
-                }
+                Material[] materials = null;
+                if (mr != null)
+                    materials = mr.sharedMaterials;
+
+                if (mf != null) Object.DestroyImmediate(mf);
+                if (mr != null) Object.DestroyImmediate(mr);
+
+                smr = setup.gameObject.AddComponent<SkinnedMeshRenderer>();
+
+                if (materials != null)
+                    smr.sharedMaterials = materials;
+            }
+
+            smr.sharedMesh = mesh;
+
+            if (!setup.skipBoneWeightTransfer)
+            {
+                smr.bones = setup.targetRenderer.bones;
+                smr.rootBone = setup.targetRenderer.rootBone;
             }
 
 #if PIERCING_MODULAR_AVATAR
@@ -58,6 +72,8 @@ namespace PiercingTool.Editor
             if (sync == null)
                 sync = setup.gameObject
                     .AddComponent<nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>();
+
+            sync.Bindings.Clear(); // 再ビルド時の重複防止
 
             for (int i = 0; i < piercingMesh.blendShapeCount; i++)
             {
