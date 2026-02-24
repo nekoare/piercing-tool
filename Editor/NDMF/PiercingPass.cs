@@ -14,6 +14,15 @@ namespace PiercingTool.Editor
 
             foreach (var setup in setups)
             {
+                // プレビューメッシュがクローンに残っている場合、元のメッシュに復元
+                var mf = setup.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null)
+                {
+                    var original = PiercingSetupEditor.FindOriginalMesh(mf.sharedMesh);
+                    if (original != null)
+                        mf.sharedMesh = original;
+                }
+
                 if (setup.targetRenderer == null) continue;
 
                 try

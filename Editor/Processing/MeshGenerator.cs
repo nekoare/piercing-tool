@@ -274,7 +274,7 @@ namespace PiercingTool.Editor
         /// 現在のBlendShape状態における参照頂点群の変形後位置を計算する（ソースメッシュローカル空間）。
         /// base位置 + 全アクティブBlendShapeのウェイト付きデルタ。
         /// </summary>
-        private static Vector3[] ComputeDeformedRefPositions(
+        public static Vector3[] ComputeDeformedRefPositions(
             SkinnedMeshRenderer renderer, Mesh sourceMesh, int[] referenceIndices,
             float[] overrideWeights = null)
         {

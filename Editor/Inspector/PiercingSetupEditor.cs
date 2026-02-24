@@ -1,10 +1,12 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 
 namespace PiercingTool.Editor
 {
     [CustomEditor(typeof(PiercingSetup))]
+    [InitializeOnLoad]
     public class PiercingSetupEditor : UnityEditor.Editor
     {
         private SerializedProperty _mode;
@@ -15,6 +17,105 @@ namespace PiercingTool.Editor
 
         private enum PickerTarget { Single, PointA, PointB }
         private PickerTarget _activePickerTarget;
+
+        // =================================================================
+        // Static BlendShape追従プレビュー
+        // Inspector選択に依存せず、位置保存後は常に動作する
+        // =================================================================
+
+        private class PreviewState
+        {
+            public MeshFilter meshFilter;
+            public Mesh previewMesh;
+            public Vector3[] originalVertices;
+            public float[] lastWeights;
+            public Mesh originalSharedMesh;
+        }
+
+        private static readonly Dictionary<int, PreviewState> s_previews =
+            new Dictionary<int, PreviewState>();
+
+        // Undo復元用: クリーンアップ後も元メッシュ参照を保持
+        private static readonly Dictionary<int, Mesh> s_originalMeshes =
+            new Dictionary<int, Mesh>();
+
+        static PiercingSetupEditor()
+        {
+            EditorApplication.update += StaticUpdatePreviews;
+            EditorSceneManager.sceneSaving += OnSceneSaving;
+            EditorSceneManager.sceneSaved += OnSceneSaved;
+            EditorApplication.playModeStateChanged += OnPlayModeChanged;
+            Undo.undoRedoPerformed += OnUndoRedo;
+        }
+
+        /// <summary>
+        /// Undo/Redo後に、プレビュー状態を復元する。
+        /// コンポーネント削除→Ctrl+Z の場合、UndoがMeshFilterを破棄済みプレビューメッシュに
+        /// 戻すためMissingになるか、またはUndoが復元したプレビューメッシュがそのまま残る。
+        /// いずれの場合も s_originalMeshes から元メッシュを復元してからプレビューを再登録する。
+        /// </summary>
+        private static void OnUndoRedo()
+        {
+            var setups = Object.FindObjectsOfType<PiercingSetup>();
+            foreach (var setup in setups)
+            {
+                int id = setup.GetInstanceID();
+                if (!setup.isPositionSaved) continue;
+
+                // 既にプレビュー管理中なら何もしない
+                if (s_previews.ContainsKey(id)) continue;
+
+                // MeshFilterがMissingまたはプレビューメッシュの場合、元メッシュを復元
+                var mf = setup.GetComponent<MeshFilter>();
+                if (mf != null &&
+                    s_originalMeshes.TryGetValue(id, out var originalMesh) && originalMesh != null &&
+                    mf.sharedMesh != originalMesh)
+                {
+                    mf.sharedMesh = originalMesh;
+                }
+
+                RegisterPreview(setup);
+            }
+        }
+
+        /// <summary>
+        /// Play Mode遷移前にプレビューを全解除（NDMFがクローンする前に元メッシュを復元する）。
+        /// </summary>
+        private static void OnPlayModeChanged(PlayModeStateChange change)
+        {
+            if (change == PlayModeStateChange.ExitingEditMode)
+                CleanupAllPreviews();
+        }
+
+        /// <summary>
+        /// 全プレビューを解除し、元のメッシュを復元する。
+        /// </summary>
+        public static void CleanupAllPreviews()
+        {
+            foreach (var kvp in s_previews)
+            {
+                var setup = EditorUtility.InstanceIDToObject(kvp.Key) as PiercingSetup;
+                CleanupPreviewState(setup, kvp.Value);
+            }
+            s_previews.Clear();
+        }
+
+        /// <summary>
+        /// プレビューメッシュに対応する元のメッシュを検索する。
+        /// NDMFビルドでクローンされたオブジェクト上のプレビューメッシュを復元するために使用。
+        /// </summary>
+        public static Mesh FindOriginalMesh(Mesh possiblePreviewMesh)
+        {
+            if (possiblePreviewMesh == null) return null;
+
+            foreach (var state in s_previews.Values)
+            {
+                if (state.previewMesh == possiblePreviewMesh)
+                    return state.originalSharedMesh;
+            }
+
+            return null;
+        }
 
         private void OnEnable()
         {
@@ -28,6 +129,7 @@ namespace PiercingTool.Editor
         {
             _pickerTool?.Deactivate();
             SceneView.duringSceneGui -= DrawSceneVisualization;
+            // プレビューはstatic管理のため、ここではクリーンアップしない
         }
 
         public override void OnInspectorGUI()
@@ -225,6 +327,9 @@ namespace PiercingTool.Editor
 
             setup.isPositionSaved = true;
             EditorUtility.SetDirty(setup);
+
+            // プレビューを登録（static管理）
+            RegisterPreview(setup);
 
             Debug.Log($"[PiercingTool] 位置を保存しました（BlendShape weights: {count}個）。");
         }
@@ -469,6 +574,203 @@ namespace PiercingTool.Editor
         }
 
         private enum VertexQuality { Ok, TooClose, Collinear }
+
+        // =================================================================
+        // BlendShape追従プレビュー（static管理）
+        // =================================================================
+
+        private static void RegisterPreview(PiercingSetup setup)
+        {
+            int id = setup.GetInstanceID();
+
+            // 既存の状態があればクリーンアップ
+            if (s_previews.TryGetValue(id, out var oldState))
+                CleanupPreviewState(setup, oldState);
+
+            s_previews[id] = new PreviewState();
+        }
+
+        private static void StaticUpdatePreviews()
+        {
+            if (s_previews.Count == 0) return;
+
+            var toRemove = new List<int>();
+            bool anyUpdated = false;
+
+            foreach (var kvp in s_previews)
+            {
+                var setup = EditorUtility.InstanceIDToObject(kvp.Key) as PiercingSetup;
+
+                // 破棄済み or 位置未保存 → クリーンアップ対象
+                if (setup == null || !setup.isPositionSaved)
+                {
+                    toRemove.Add(kvp.Key);
+                    continue;
+                }
+
+                if (UpdatePreviewForSetup(setup, kvp.Value))
+                    anyUpdated = true;
+            }
+
+            foreach (var id in toRemove)
+            {
+                if (s_previews.TryGetValue(id, out var state))
+                {
+                    var setup = EditorUtility.InstanceIDToObject(id) as PiercingSetup;
+                    CleanupPreviewState(setup, state);
+                    s_previews.Remove(id);
+                }
+            }
+
+            if (anyUpdated)
+                SceneView.RepaintAll();
+        }
+
+        private static bool UpdatePreviewForSetup(PiercingSetup setup, PreviewState state)
+        {
+            if (setup.targetRenderer == null) return false;
+            if (setup.mode != PiercingMode.Single) return false;
+
+            var renderer = setup.targetRenderer;
+            var sourceMesh = renderer.sharedMesh;
+            if (sourceMesh == null) return false;
+
+            var refIndices = setup.referenceVertices;
+            if (refIndices.Count == 0) return false;
+
+            // BlendShape weight 変更検知
+            int blendShapeCount = sourceMesh.blendShapeCount;
+            bool weightsChanged = false;
+
+            if (state.lastWeights == null || state.lastWeights.Length != blendShapeCount)
+            {
+                state.lastWeights = new float[blendShapeCount];
+                weightsChanged = true;
+            }
+
+            for (int i = 0; i < blendShapeCount; i++)
+            {
+                float w = renderer.GetBlendShapeWeight(i);
+                if (Mathf.Abs(w - state.lastWeights[i]) > 0.01f)
+                    weightsChanged = true;
+                state.lastWeights[i] = w;
+            }
+
+            if (!weightsChanged) return false;
+
+            // プレビューメッシュの初期化
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf == null) return false;
+
+            if (state.previewMesh == null)
+            {
+                state.originalSharedMesh = mf.sharedMesh;
+                if (state.originalSharedMesh == null) return false;
+                s_originalMeshes[setup.GetInstanceID()] = state.originalSharedMesh;
+                state.meshFilter = mf;
+                state.previewMesh = Object.Instantiate(state.originalSharedMesh);
+                state.previewMesh.name = state.originalSharedMesh.name + "_Preview";
+                state.previewMesh.hideFlags = HideFlags.HideAndDontSave;
+                state.originalVertices = state.previewMesh.vertices;
+                mf.sharedMesh = state.previewMesh;
+            }
+
+            // 剛体変換を計算して頂点に適用
+            ApplyRigidPreview(setup, sourceMesh, state);
+            return true;
+        }
+
+        private static void ApplyRigidPreview(PiercingSetup setup, Mesh sourceMesh, PreviewState state)
+        {
+            var renderer = setup.targetRenderer;
+            var refIndicesArr = setup.referenceVertices.ToArray();
+
+            // ソース→ピアス座標変換行列
+            var sourceToPiercing = setup.transform.worldToLocalMatrix *
+                                   renderer.transform.localToWorldMatrix;
+
+            // 保存時の参照頂点位置（ソース空間）
+            var savedRefPosSrc = MeshGenerator.ComputeDeformedRefPositions(
+                renderer, sourceMesh, refIndicesArr, setup.savedBlendShapeWeights);
+
+            // 現在の参照頂点位置（ソース空間）
+            var currentRefPosSrc = MeshGenerator.ComputeDeformedRefPositions(
+                renderer, sourceMesh, refIndicesArr, null);
+
+            // ピアス空間に変換
+            var savedPiercing = new Vector3[refIndicesArr.Length];
+            var currentPiercing = new Vector3[refIndicesArr.Length];
+            for (int i = 0; i < refIndicesArr.Length; i++)
+            {
+                savedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(savedRefPosSrc[i]);
+                currentPiercing[i] = sourceToPiercing.MultiplyPoint3x4(currentRefPosSrc[i]);
+            }
+
+            // 回転を計算（saved → current）
+            Quaternion rotation;
+            if (refIndicesArr.Length == 3)
+            {
+                rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                    savedPiercing[0], savedPiercing[1], savedPiercing[2],
+                    currentPiercing[0], currentPiercing[1], currentPiercing[2]);
+            }
+            else
+            {
+                var deltas = new Vector3[refIndicesArr.Length];
+                for (int i = 0; i < deltas.Length; i++)
+                    deltas[i] = currentPiercing[i] - savedPiercing[i];
+                rotation = BlendShapeTransferEngine.ComputeRigidDelta(
+                    savedPiercing, deltas).rotation;
+            }
+
+            var savedCentroid = BlendShapeTransferEngine.ComputeCentroid(savedPiercing);
+            var currentCentroid = BlendShapeTransferEngine.ComputeCentroid(currentPiercing);
+
+            // 順変換をピアス頂点に適用（saved → current）
+            var vertices = new Vector3[state.originalVertices.Length];
+            for (int i = 0; i < vertices.Length; i++)
+                vertices[i] = rotation * (state.originalVertices[i] - savedCentroid) + currentCentroid;
+
+            state.previewMesh.vertices = vertices;
+            state.previewMesh.RecalculateBounds();
+        }
+
+        private static void CleanupPreviewState(PiercingSetup setup, PreviewState state)
+        {
+            if (state.previewMesh != null)
+            {
+                // コンポーネント削除時でも meshFilter 経由で復元できる
+                if (state.meshFilter != null && state.originalSharedMesh != null)
+                    state.meshFilter.sharedMesh = state.originalSharedMesh;
+                Object.DestroyImmediate(state.previewMesh);
+            }
+        }
+
+        /// <summary>
+        /// シーン保存前に元のメッシュを復元（プレビューメッシュがシリアライズされるのを防ぐ）。
+        /// </summary>
+        private static void OnSceneSaving(UnityEngine.SceneManagement.Scene scene, string path)
+        {
+            foreach (var kvp in s_previews)
+            {
+                var state = kvp.Value;
+                if (state.meshFilter != null && state.originalSharedMesh != null)
+                    state.meshFilter.sharedMesh = state.originalSharedMesh;
+            }
+        }
+
+        /// <summary>
+        /// シーン保存後にプレビューメッシュを再適用。
+        /// </summary>
+        private static void OnSceneSaved(UnityEngine.SceneManagement.Scene scene)
+        {
+            foreach (var kvp in s_previews)
+            {
+                var state = kvp.Value;
+                if (state.meshFilter != null && state.previewMesh != null)
+                    state.meshFilter.sharedMesh = state.previewMesh;
+            }
+        }
 
         // =================================================================
         // バリデーション
