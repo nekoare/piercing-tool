@@ -63,7 +63,8 @@ namespace PiercingTool.Editor
                 // 配置時にBlendShapeが有効な場合、ピアス頂点をBASE状態に補正
                 CorrectPiercingToBasePosition(
                     setup.targetRenderer, sourceMesh, piercingMesh,
-                    refIndicesArr, sourceToPiercing);
+                    refIndicesArr, sourceToPiercing,
+                    setup.savedBlendShapeWeights);
 
                 transferred = BlendShapeTransferEngine.TransferBlendShapesSingle(
                     sourceMesh, piercingMesh,
@@ -77,7 +78,8 @@ namespace PiercingTool.Editor
                 var allRefIndices = combined.ToArray();
 
                 var blendShapeOffset = ComputeBlendShapeOffsetCentroid(
-                    setup.targetRenderer, sourceMesh, allRefIndices);
+                    setup.targetRenderer, sourceMesh, allRefIndices,
+                    setup.savedBlendShapeWeights);
                 if (blendShapeOffset.magnitude > 0.0001f)
                 {
                     var piercingOffset = sourceToPiercing.MultiplyVector(blendShapeOffset);
@@ -215,12 +217,14 @@ namespace PiercingTool.Editor
         /// </summary>
         private static void CorrectPiercingToBasePosition(
             SkinnedMeshRenderer renderer, Mesh sourceMesh, Mesh piercingMesh,
-            int[] referenceIndices, Matrix4x4 sourceToPiercing)
+            int[] referenceIndices, Matrix4x4 sourceToPiercing,
+            float[] overrideWeights = null)
         {
             // ソース空間で変形前/後の位置を取得
             var baseRefPosSrc = BlendShapeTransferEngine.ExtractPositions(
                 sourceMesh.vertices, referenceIndices);
-            var deformedRefPosSrc = ComputeDeformedRefPositions(renderer, sourceMesh, referenceIndices);
+            var deformedRefPosSrc = ComputeDeformedRefPositions(
+                renderer, sourceMesh, referenceIndices, overrideWeights);
 
             // ピアス空間に変換して回転を計算（非一様スケールの往復変換を回避）
             var basePiercing = new Vector3[referenceIndices.Length];
@@ -271,7 +275,8 @@ namespace PiercingTool.Editor
         /// base位置 + 全アクティブBlendShapeのウェイト付きデルタ。
         /// </summary>
         private static Vector3[] ComputeDeformedRefPositions(
-            SkinnedMeshRenderer renderer, Mesh sourceMesh, int[] referenceIndices)
+            SkinnedMeshRenderer renderer, Mesh sourceMesh, int[] referenceIndices,
+            float[] overrideWeights = null)
         {
             var sourceVertices = sourceMesh.vertices;
             int vertexCount = sourceMesh.vertexCount;
@@ -292,7 +297,9 @@ namespace PiercingTool.Editor
 
             for (int si = 0; si < blendShapeCount; si++)
             {
-                float weight = renderer.GetBlendShapeWeight(si);
+                float weight = overrideWeights != null && si < overrideWeights.Length
+                    ? overrideWeights[si]
+                    : renderer.GetBlendShapeWeight(si);
                 if (Mathf.Abs(weight) < 0.01f) continue;
 
                 int frameCount = sourceMesh.GetBlendShapeFrameCount(si);
@@ -320,10 +327,11 @@ namespace PiercingTool.Editor
         /// 剛体変換方式のフォールバック用。
         /// </summary>
         private static Vector3 ComputeBlendShapeOffsetCentroid(
-            SkinnedMeshRenderer renderer, Mesh sourceMesh, int[] referenceIndices)
+            SkinnedMeshRenderer renderer, Mesh sourceMesh, int[] referenceIndices,
+            float[] overrideWeights = null)
         {
             var sourceVertices = sourceMesh.vertices;
-            var deformed = ComputeDeformedRefPositions(renderer, sourceMesh, referenceIndices);
+            var deformed = ComputeDeformedRefPositions(renderer, sourceMesh, referenceIndices, overrideWeights);
 
             var offset = Vector3.zero;
             for (int i = 0; i < referenceIndices.Length; i++)
