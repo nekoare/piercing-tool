@@ -19,6 +19,13 @@ namespace PiercingTool
         [Tooltip("参照頂点のインデックスリスト")]
         public List<int> referenceVertices = new List<int>();
 
+        // --- 位置保存（NDMF用） ---
+        [HideInInspector]
+        public float[] savedBlendShapeWeights;
+
+        [HideInInspector]
+        public bool isPositionSaved;
+
         // --- Chain mode ---
         [Tooltip("チェーンのPoint A参照頂点")]
         public List<int> pointAVertices = new List<int>();
