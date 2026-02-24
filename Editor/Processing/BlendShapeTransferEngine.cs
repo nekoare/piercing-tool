@@ -7,6 +7,7 @@ namespace PiercingTool.Editor
     /// <summary>
     /// 参照頂点のBlendShapeデルタから剛体変換（位置＋回転）を計算し、
     /// ピアスメッシュにBlendShapeとして転写するエンジン。
+    /// 全参照頂点から最適回転を算出するため、頂点選択に依存しないロバストな結果を得られる。
     /// </summary>
     public static class BlendShapeTransferEngine
     {
@@ -23,6 +24,7 @@ namespace PiercingTool.Editor
 
         /// <summary>
         /// 参照頂点群のBlendShapeデルタから剛体変換を計算する。
+        /// 3頂点以上の場合、全頂点から最適回転を算出する（Davenport q-method）。
         /// </summary>
         public static RigidDelta ComputeRigidDelta(
             Vector3[] basePositions,
@@ -48,7 +50,13 @@ namespace PiercingTool.Editor
             // 回転計算
             Quaternion rotationDelta;
             if (count >= 3)
-                rotationDelta = ComputeRotationFromPlane(basePositions, deltaPositions);
+            {
+                var deformedPositions = new Vector3[count];
+                for (int i = 0; i < count; i++)
+                    deformedPositions[i] = basePositions[i] + deltaPositions[i];
+                rotationDelta = ComputeOptimalRotation(
+                    basePositions, baseCentroid, deformedPositions, shapeCentroid);
+            }
             else if (count == 2)
                 rotationDelta = ComputeRotationFromAxis(basePositions, deltaPositions);
             else
@@ -57,33 +65,116 @@ namespace PiercingTool.Editor
             return new RigidDelta { position = positionDelta, rotation = rotationDelta };
         }
 
-        /// <summary>3頂点以上: 法線＋接線から回転を算出</summary>
-        private static Quaternion ComputeRotationFromPlane(
-            Vector3[] basePositions, Vector3[] deltaPositions)
+        /// <summary>
+        /// 剛体デルタをソースメッシュローカル空間からピアスメッシュローカル空間に変換する。
+        /// sourceToPiercingSpace = piercingTransform.worldToLocalMatrix * sourceTransform.localToWorldMatrix
+        /// </summary>
+        public static RigidDelta TransformRigidDelta(RigidDelta delta, Matrix4x4 sourceToPiercingSpace)
         {
-            var baseEdge1 = basePositions[1] - basePositions[0];
-            var baseEdge2 = basePositions[2] - basePositions[0];
-            var baseNormal = Vector3.Cross(baseEdge1, baseEdge2).normalized;
-            var baseTangent = baseEdge1.normalized;
+            // 位置デルタ: ベクトルとして変換（回転＋スケール適用）
+            Vector3 transformedPosition = sourceToPiercingSpace.MultiplyVector(delta.position);
 
-            if (baseNormal.sqrMagnitude < 1e-6f || baseTangent.sqrMagnitude < 1e-6f)
+            // 回転デルタ: 座標変換の回転成分で共役をとる
+            Quaternion coordRotation = sourceToPiercingSpace.rotation;
+            Quaternion transformedRotation = coordRotation * delta.rotation * Quaternion.Inverse(coordRotation);
+
+            return new RigidDelta { position = transformedPosition, rotation = transformedRotation };
+        }
+
+        /// <summary>
+        /// N個の対応点ペアから最適な回転を計算する（Davenport q-method）。
+        /// 相互共分散行列から4x4対称行列を構築し、べき乗法で最大固有ベクトル（=最適回転四元数）を求める。
+        /// 全頂点を使用するため、特定の3頂点の選び方に依存しない安定した結果が得られる。
+        /// </summary>
+        private static Quaternion ComputeOptimalRotation(
+            Vector3[] basePositions, Vector3 baseCentroid,
+            Vector3[] deformedPositions, Vector3 deformedCentroid)
+        {
+            int count = basePositions.Length;
+            if (count < 2) return Quaternion.identity;
+
+            // 相互共分散行列 H = Σ(q_i ⊗ p_i^T)
+            // p_i = base_i - baseCentroid (参照フレーム), q_i = deformed_i - deformedCentroid (観測フレーム)
+            // Davenport法では H_{ij} = Σ q_i * p_j（観測×参照^T）が正しい定義
+            float Sxx = 0, Sxy = 0, Sxz = 0;
+            float Syx = 0, Syy = 0, Syz = 0;
+            float Szx = 0, Szy = 0, Szz = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 p = basePositions[i] - baseCentroid;
+                Vector3 q = deformedPositions[i] - deformedCentroid;
+                Sxx += q.x * p.x; Sxy += q.x * p.y; Sxz += q.x * p.z;
+                Syx += q.y * p.x; Syy += q.y * p.y; Syz += q.y * p.z;
+                Szx += q.z * p.x; Szy += q.z * p.y; Szz += q.z * p.z;
+            }
+
+            // Davenport 4x4対称行列 N
+            // 最大固有ベクトル = 最適回転の四元数 (w, x, y, z)
+            float[] N = {
+                Sxx + Syy + Szz,  Syz - Szy,        Szx - Sxz,        Sxy - Syx,
+                Syz - Szy,        Sxx - Syy - Szz,  Sxy + Syx,        Szx + Sxz,
+                Szx - Sxz,        Sxy + Syx,       -Sxx + Syy - Szz,  Syz + Szy,
+                Sxy - Syx,        Szx + Sxz,        Syz + Szy,       -Sxx - Syy + Szz
+            };
+
+            // べき乗法で最大固有ベクトルを求める
+            float[] v = { 1f, 0f, 0f, 0f };
+            for (int iter = 0; iter < 30; iter++)
+            {
+                float[] nv = { 0f, 0f, 0f, 0f };
+                for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        nv[r] += N[r * 4 + c] * v[c];
+
+                float mag = Mathf.Sqrt(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2] + nv[3] * nv[3]);
+                if (mag < 1e-10f) return Quaternion.identity;
+
+                v[0] = nv[0] / mag; v[1] = nv[1] / mag; v[2] = nv[2] / mag; v[3] = nv[3] / mag;
+            }
+
+            // v = (w, x, y, z) → Unity Quaternion(x, y, z, w)
+            return new Quaternion(v[1], v[2], v[3], v[0]).normalized;
+        }
+
+        /// <summary>
+        /// 三角面のbase→deformed間のフレーム回転を計算する。
+        /// 三角面の辺ベクトルと法線から直交座標系を構築し、その変化から回転を求める。
+        /// Davenport法と異なり、3頂点が密集していても面が退化していなければ安定した結果が得られる。
+        /// </summary>
+        public static Quaternion ComputeTriangleFrameRotation(
+            Vector3 v0Base, Vector3 v1Base, Vector3 v2Base,
+            Vector3 v0Def, Vector3 v1Def, Vector3 v2Def)
+        {
+            // Base frame
+            Vector3 baseEdge1 = v1Base - v0Base;
+            Vector3 baseEdge2 = v2Base - v0Base;
+            Vector3 baseNormal = Vector3.Cross(baseEdge1, baseEdge2);
+
+            if (baseNormal.sqrMagnitude < 1e-12f)
                 return Quaternion.identity;
 
-            var shapeP0 = basePositions[0] + deltaPositions[0];
-            var shapeP1 = basePositions[1] + deltaPositions[1];
-            var shapeP2 = basePositions[2] + deltaPositions[2];
-            var shapeEdge1 = shapeP1 - shapeP0;
-            var shapeEdge2 = shapeP2 - shapeP0;
-            var shapeNormal = Vector3.Cross(shapeEdge1, shapeEdge2).normalized;
-            var shapeTangent = shapeEdge1.normalized;
+            baseNormal.Normalize();
+            Vector3 baseE1 = baseEdge1.normalized;
+            Vector3 baseE2 = Vector3.Cross(baseNormal, baseE1);
 
-            if (shapeNormal.sqrMagnitude < 1e-6f || shapeTangent.sqrMagnitude < 1e-6f)
+            // Deformed frame
+            Vector3 defEdge1 = v1Def - v0Def;
+            Vector3 defEdge2 = v2Def - v0Def;
+            Vector3 defNormal = Vector3.Cross(defEdge1, defEdge2);
+
+            if (defNormal.sqrMagnitude < 1e-12f)
                 return Quaternion.identity;
 
-            var baseRotation = Quaternion.LookRotation(baseNormal, baseTangent);
-            var shapeRotation = Quaternion.LookRotation(shapeNormal, shapeTangent);
+            defNormal.Normalize();
+            Vector3 defE1 = defEdge1.normalized;
+            Vector3 defE2 = Vector3.Cross(defNormal, defE1);
 
-            return shapeRotation * Quaternion.Inverse(baseRotation);
+            // Frame rotation: base → deformed
+            Quaternion baseRot = Quaternion.LookRotation(baseNormal, baseE2);
+            Quaternion defRot = Quaternion.LookRotation(defNormal, defE2);
+
+            return defRot * Quaternion.Inverse(baseRot);
         }
 
         /// <summary>2頂点: 軸方向の回転のみ</summary>
@@ -106,12 +197,14 @@ namespace PiercingTool.Editor
 
         /// <summary>
         /// Singleモード: 参照頂点のBlendShapeデルタをピアスメッシュに剛体変換として転写する。
+        /// ピアス空間で直接剛体変換を計算することで、座標変換の回転共役を回避し、
+        /// スケール差がある場合でも正確な結果を得る。
         /// </summary>
         public static List<string> TransferBlendShapesSingle(
             Mesh sourceMesh,
             Mesh piercingMesh,
             int[] referenceIndices,
-            Vector3 piercingOrigin,
+            Matrix4x4 sourceToPiercingSpace,
             float deltaThreshold = 0.0001f)
         {
             var transferredNames = new List<string>();
@@ -121,13 +214,21 @@ namespace PiercingTool.Editor
             var piercingVertices = piercingMesh.vertices;
             var sourceVertices = sourceMesh.vertices;
 
-            // 参照頂点のベース位置を抽出
-            var basePositions = ExtractPositions(sourceVertices, referenceIndices);
+            // 参照頂点のベース位置をピアス空間に変換（ループ外で1回だけ）
+            var basePositionsSrc = ExtractPositions(sourceVertices, referenceIndices);
+            var basePositionsPiercing = new Vector3[referenceIndices.Length];
+            for (int i = 0; i < referenceIndices.Length; i++)
+                basePositionsPiercing[i] = sourceToPiercingSpace.MultiplyPoint3x4(basePositionsSrc[i]);
+
+            // 回転ピボット = ピアス空間でのベース重心（自然に正しい位置）
+            var rotationPivot = ComputeCentroid(basePositionsPiercing);
 
             int blendShapeCount = sourceMesh.blendShapeCount;
             var srcDeltaVertices = new Vector3[sourceVertexCount];
             var srcDeltaNormals = new Vector3[sourceVertexCount];
             var srcDeltaTangents = new Vector3[sourceVertexCount];
+            var deformedPiercing = new Vector3[referenceIndices.Length];
+            var deltasPiercing = new Vector3[referenceIndices.Length];
 
             for (int si = 0; si < blendShapeCount; si++)
             {
@@ -137,15 +238,37 @@ namespace PiercingTool.Editor
                 sourceMesh.GetBlendShapeFrameVertices(si, frameCount - 1,
                     srcDeltaVertices, srcDeltaNormals, srcDeltaTangents);
 
-                // 参照頂点のデルタを抽出
-                var refDeltas = ExtractPositions(srcDeltaVertices, referenceIndices);
+                // 変形後位置をピアス空間に変換し、ピアス空間でのデルタを計算
+                for (int i = 0; i < referenceIndices.Length; i++)
+                {
+                    int idx = referenceIndices[i];
+                    var deformedSrc = sourceVertices[idx] + srcDeltaVertices[idx];
+                    deformedPiercing[i] = sourceToPiercingSpace.MultiplyPoint3x4(deformedSrc);
+                    deltasPiercing[i] = deformedPiercing[i] - basePositionsPiercing[i];
+                }
 
-                // 剛体変換デルタを計算
-                var rigid = ComputeRigidDelta(basePositions, refDeltas);
+                // 回転を計算
+                Quaternion rotation;
+                if (referenceIndices.Length == 3)
+                {
+                    // 三角面フレーム回転: 面の辺・法線の変化から直接回転を計算
+                    // Davenport法と異なり密集頂点でも安定し、局所的な面の傾き変化を正確に捉える
+                    rotation = ComputeTriangleFrameRotation(
+                        basePositionsPiercing[0], basePositionsPiercing[1], basePositionsPiercing[2],
+                        deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                }
+                else
+                {
+                    // 4頂点以上: Davenport法、1-2頂点: 既存のフォールバック
+                    rotation = ComputeRigidDelta(basePositionsPiercing, deltasPiercing).rotation;
+                }
+
+                // 並進: 参照頂点の重心デルタ
+                var translation = ComputeCentroid(deltasPiercing);
 
                 // 閾値チェック
-                if (rigid.position.magnitude < deltaThreshold &&
-                    Quaternion.Angle(rigid.rotation, Quaternion.identity) < 0.01f)
+                if (translation.magnitude < deltaThreshold &&
+                    Quaternion.Angle(rotation, Quaternion.identity) < 0.01f)
                     continue;
 
                 // ピアスメッシュの全頂点に剛体変換を適用
@@ -155,8 +278,8 @@ namespace PiercingTool.Editor
 
                 for (int vi = 0; vi < piercingVertexCount; vi++)
                 {
-                    var localPos = piercingVertices[vi] - piercingOrigin;
-                    piercingDeltas[vi] = rigid.rotation * localPos - localPos + rigid.position;
+                    var localPos = piercingVertices[vi] - rotationPivot;
+                    piercingDeltas[vi] = rotation * localPos - localPos + translation;
                 }
 
                 float frameWeight = sourceMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
@@ -209,7 +332,7 @@ namespace PiercingTool.Editor
             Mesh piercingMesh,
             int[] pointAIndices,
             int[] pointBIndices,
-            Vector3 piercingOrigin,
+            Matrix4x4 sourceToPiercingSpace,
             float deltaThreshold = 0.0001f)
         {
             var transferredNames = new List<string>();
@@ -224,7 +347,10 @@ namespace PiercingTool.Editor
             var centroidA = ComputeCentroid(baseA);
             var centroidB = ComputeCentroid(baseB);
 
-            var tValues = ComputeChainTValues(piercingVertices, centroidA, centroidB);
+            // セントロイドをピアス空間に変換してt値を計算
+            var piercingCentroidA = sourceToPiercingSpace.MultiplyPoint3x4(centroidA);
+            var piercingCentroidB = sourceToPiercingSpace.MultiplyPoint3x4(centroidB);
+            var tValues = ComputeChainTValues(piercingVertices, piercingCentroidA, piercingCentroidB);
 
             int blendShapeCount = sourceMesh.blendShapeCount;
             var srcDeltaVertices = new Vector3[sourceVertexCount];
@@ -244,13 +370,17 @@ namespace PiercingTool.Editor
                 var rigidA = ComputeRigidDelta(baseA, deltasA);
                 var rigidB = ComputeRigidDelta(baseB, deltasB);
 
-                // 閾値チェック
+                // 閾値チェック（ソース空間で判定）
                 bool aSignificant = rigidA.position.magnitude >= deltaThreshold ||
                                     Quaternion.Angle(rigidA.rotation, Quaternion.identity) >= 0.01f;
                 bool bSignificant = rigidB.position.magnitude >= deltaThreshold ||
                                     Quaternion.Angle(rigidB.rotation, Quaternion.identity) >= 0.01f;
                 if (!aSignificant && !bSignificant)
                     continue;
+
+                // ソース空間→ピアス空間に変換
+                var transformedA = TransformRigidDelta(rigidA, sourceToPiercingSpace);
+                var transformedB = TransformRigidDelta(rigidB, sourceToPiercingSpace);
 
                 var piercingDeltas = new Vector3[piercingVertexCount];
                 var piercingNormalDeltas = new Vector3[piercingVertexCount];
@@ -259,10 +389,12 @@ namespace PiercingTool.Editor
                 for (int vi = 0; vi < piercingVertexCount; vi++)
                 {
                     float t = tValues[vi];
-                    var pos = Vector3.Lerp(rigidA.position, rigidB.position, t);
-                    var rot = Quaternion.Slerp(rigidA.rotation, rigidB.rotation, t);
+                    var pos = Vector3.Lerp(transformedA.position, transformedB.position, t);
+                    var rot = Quaternion.Slerp(transformedA.rotation, transformedB.rotation, t);
 
-                    var localPos = piercingVertices[vi] - piercingOrigin;
+                    // t値に応じて回転ピボットも補間
+                    var pivot = Vector3.Lerp(piercingCentroidA, piercingCentroidB, t);
+                    var localPos = piercingVertices[vi] - pivot;
                     piercingDeltas[vi] = rot * localPos - localPos + pos;
                 }
 
