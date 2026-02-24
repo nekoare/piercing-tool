@@ -24,6 +24,8 @@ namespace PiercingTool.Editor
                 {
                     Debug.LogError($"[PiercingTool] ピアス処理に失敗しました: {setup.gameObject.name}\n{e}");
                 }
+
+                Object.DestroyImmediate(setup);
             }
         }
 

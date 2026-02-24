@@ -96,7 +96,7 @@ namespace PiercingTool.Editor
             controller.name = "PiercingViseme";
 
             // Visemeパラメータ追加
-            controller.AddParameter("Viseme", AnimatorControllerParameterType.Int);
+            controller.AddParameter("Viseme", AnimatorControllerParameterType.Float);
 
             // レイヤー追加
             controller.AddLayer("PiercingViseme");

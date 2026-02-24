@@ -7,7 +7,8 @@
     "nadena.dev.ndmf.runtime",
     "nadena.dev.modular-avatar.core",
     "VRC.SDK3A",
-    "VRC.SDKBase"
+    "VRC.SDKBase",
+    "com.anatawa12.avatar-optimizer.api.editor"
   ],
   "includePlatforms": ["Editor"],
   "autoReferenced": false,
@@ -25,6 +26,10 @@
     {
       "name": "com.vrchat.avatars",
       "define": "PIERCING_VRCSDK"
+    },
+    {
+      "name": "com.anatawa12.avatar-optimizer",
+      "define": "PIERCING_AAO"
     }
   ]
 }
