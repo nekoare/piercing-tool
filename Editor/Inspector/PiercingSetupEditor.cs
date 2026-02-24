@@ -61,19 +61,15 @@ namespace PiercingTool.Editor
 
             EditorGUILayout.Space(10);
 
-            // --- Generate Mesh ボタン ---
+            // --- 位置を保存ボタン ---
             using (new EditorGUI.DisabledScope(!IsReadyToGenerate(setup)))
             {
-                if (GUILayout.Button("メッシュを生成", GUILayout.Height(30)))
+                string buttonLabel = setup.isPositionSaved ? "位置を保存（保存済み）" : "位置を保存";
+                if (GUILayout.Button(buttonLabel, GUILayout.Height(30)))
                 {
                     try
                     {
-                        var mesh = MeshGenerator.Generate(setup);
-                        var path = MeshGenerator.SaveMeshAsset(mesh);
-                        if (path != null)
-                        {
-                            ApplyGeneratedMesh(setup, mesh);
-                        }
+                        SavePosition(setup);
                     }
                     catch (System.Exception e)
                     {
@@ -203,107 +199,25 @@ namespace PiercingTool.Editor
                 return setup.pointAVertices.Count > 0 && setup.pointBVertices.Count > 0;
         }
 
-        /// <summary>
-        /// 生成されたメッシュをSkinnedMeshRendererに適用し、bones/rootBoneも自動設定する。
-        /// MeshFilter+MeshRendererの場合は自動でSkinnedMeshRendererに変換する。
-        /// </summary>
-        private void ApplyGeneratedMesh(PiercingSetup setup, Mesh mesh)
+        private void SavePosition(PiercingSetup setup)
         {
-            var smr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (setup.targetRenderer == null)
+                throw new System.InvalidOperationException("対象Rendererが設定されていません。");
 
-            // MeshFilter+MeshRenderer → SkinnedMeshRendererに変換
-            if (smr == null)
-            {
-                var mf = setup.GetComponent<MeshFilter>();
-                var mr = setup.GetComponent<MeshRenderer>();
+            Undo.RecordObject(setup, "Save piercing position");
 
-                // 変換前のマテリアルを保持
-                Material[] materials = null;
-                if (mr != null)
-                    materials = mr.sharedMaterials;
+            // BlendShape weightsスナップショットを保存
+            var smr = setup.targetRenderer;
+            int count = smr.sharedMesh != null ? smr.sharedMesh.blendShapeCount : 0;
+            setup.savedBlendShapeWeights = new float[count];
+            for (int i = 0; i < count; i++)
+                setup.savedBlendShapeWeights[i] = smr.GetBlendShapeWeight(i);
 
-                // MeshFilter, MeshRendererを削除
-                if (mf != null) Undo.DestroyObjectImmediate(mf);
-                if (mr != null) Undo.DestroyObjectImmediate(mr);
+            setup.isPositionSaved = true;
+            EditorUtility.SetDirty(setup);
 
-                // SkinnedMeshRendererを追加
-                smr = Undo.AddComponent<SkinnedMeshRenderer>(setup.gameObject);
-
-                // マテリアルを復元
-                if (materials != null)
-                    smr.sharedMaterials = materials;
-
-                Debug.Log("[PiercingTool] MeshFilter+MeshRenderer → SkinnedMeshRendererに変換しました。");
-            }
-            else
-            {
-                Undo.RecordObject(smr, "Apply generated piercing mesh");
-            }
-
-            smr.sharedMesh = mesh;
-
-            if (!setup.skipBoneWeightTransfer)
-            {
-                smr.bones = setup.targetRenderer.bones;
-                smr.rootBone = setup.targetRenderer.rootBone;
-            }
-
-            EditorUtility.SetDirty(smr);
-            Debug.Log("[PiercingTool] SkinnedMeshRendererにメッシュ・bones・rootBoneを自動設定しました。");
-
-#if PIERCING_MODULAR_AVATAR
-            SetupBlendShapeSync(setup, mesh);
-#endif
+            Debug.Log($"[PiercingTool] 位置を保存しました（BlendShape weights: {count}個）。");
         }
-
-#if PIERCING_MODULAR_AVATAR
-        private void SetupBlendShapeSync(PiercingSetup setup, Mesh piercingMesh)
-        {
-            var sync = setup.gameObject
-                .GetComponent<nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>();
-
-            if (sync == null)
-                sync = Undo.AddComponent<nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>(
-                    setup.gameObject);
-            else
-                Undo.RecordObject(sync, "Setup BlendShape Sync");
-
-            // 既存のBindingsをクリアして再設定（再生成時に重複しないように）
-            sync.Bindings.Clear();
-
-            for (int i = 0; i < piercingMesh.blendShapeCount; i++)
-            {
-                string shapeName = piercingMesh.GetBlendShapeName(i);
-                var binding = new nadena.dev.modular_avatar.core.BlendshapeBinding
-                {
-                    ReferenceMesh = new nadena.dev.modular_avatar.core.AvatarObjectReference
-                    {
-                        referencePath = GetRelativePath(
-                            setup.targetRenderer.transform,
-                            setup.transform.root)
-                    },
-                    Blendshape = shapeName,
-                    LocalBlendshape = shapeName
-                };
-                sync.Bindings.Add(binding);
-            }
-
-            EditorUtility.SetDirty(sync);
-            Debug.Log($"[PiercingTool] MA BlendShape Syncを設定しました（{piercingMesh.blendShapeCount}個のBlendShape）。");
-        }
-
-        private static string GetRelativePath(Transform target, Transform root)
-        {
-            var parts = new System.Collections.Generic.List<string>();
-            var current = target;
-            while (current != null && current != root)
-            {
-                parts.Insert(0, current.name);
-                current = current.parent;
-            }
-            return string.Join("/", parts);
-        }
-#endif
 
         // =================================================================
         // SceneView 参照頂点の可視化
