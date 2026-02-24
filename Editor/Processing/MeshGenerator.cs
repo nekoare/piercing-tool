@@ -135,13 +135,14 @@ namespace PiercingTool.Editor
 
         private static Mesh GetPiercingMesh(PiercingSetup setup)
         {
-            var smr = setup.GetComponent<SkinnedMeshRenderer>();
-            if (smr != null && smr.sharedMesh != null)
-                return smr.sharedMesh;
-
+            // MeshFilterを優先（元メッシュが残っている場合はそちらを使う）
             var mf = setup.GetComponent<MeshFilter>();
             if (mf != null && mf.sharedMesh != null)
                 return mf.sharedMesh;
+
+            var smr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (smr != null && smr.sharedMesh != null)
+                return smr.sharedMesh;
 
             return null;
         }
