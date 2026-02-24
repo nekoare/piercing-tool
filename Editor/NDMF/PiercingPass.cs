@@ -1,4 +1,5 @@
 #if PIERCING_NDMF
+using System.Collections.Generic;
 using nadena.dev.ndmf;
 using UnityEngine;
 
@@ -75,9 +76,20 @@ namespace PiercingTool.Editor
 
             sync.Bindings.Clear(); // 再ビルド時の重複防止
 
+#if PIERCING_VRCSDK
+            var visemeNames = GetVisemeBlendShapeNames(setup.transform.root);
+#else
+            HashSet<string> visemeNames = null;
+#endif
+
             for (int i = 0; i < piercingMesh.blendShapeCount; i++)
             {
                 string shapeName = piercingMesh.GetBlendShapeName(i);
+
+                // Viseme BlendShapeはAnimatorで駆動するのでSyncから除外
+                if (visemeNames != null && visemeNames.Contains(shapeName))
+                    continue;
+
                 var binding = new nadena.dev.modular_avatar.core.BlendshapeBinding
                 {
                     ReferenceMesh = new nadena.dev.modular_avatar.core.AvatarObjectReference
@@ -95,7 +107,7 @@ namespace PiercingTool.Editor
 
         private string GetRelativePath(Transform target, Transform root)
         {
-            var parts = new System.Collections.Generic.List<string>();
+            var parts = new List<string>();
             var current = target;
             while (current != null && current != root)
             {
@@ -103,6 +115,20 @@ namespace PiercingTool.Editor
                 current = current.parent;
             }
             return string.Join("/", parts);
+        }
+#endif
+
+#if PIERCING_VRCSDK
+        private static HashSet<string> GetVisemeBlendShapeNames(Transform avatarRoot)
+        {
+            var descriptor = avatarRoot.GetComponent<VRC.SDKBase.VRC_AvatarDescriptor>();
+            if (descriptor == null) return null;
+            if (descriptor.lipSync != VRC.SDKBase.VRC_AvatarDescriptor.LipSyncStyle.VisemeBlendShape)
+                return null;
+            if (descriptor.VisemeBlendShapes == null || descriptor.VisemeBlendShapes.Length == 0)
+                return null;
+
+            return new HashSet<string>(descriptor.VisemeBlendShapes);
         }
 #endif
     }
