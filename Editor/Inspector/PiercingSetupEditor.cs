@@ -605,6 +605,16 @@ namespace PiercingTool.Editor
                 {
                     Undo.RecordObject(setup, "Select vertex");
                     EditorUtility.SetDirty(setup);
+
+                    // ピアス側ピッカーの場合、対応アンカーの Target 頂点を自動検出
+                    if (usePiercingMesh &&
+                        pickerTarget >= PickerTarget.AnchorPiercing0 &&
+                        pickerTarget <= PickerTarget.AnchorPiercing7)
+                    {
+                        int anchorIdx = (int)pickerTarget - (int)PickerTarget.AnchorPiercing0;
+                        AutoDetectTargetForAnchor(setup, anchorIdx);
+                    }
+
                     Repaint();
                 }
             };
@@ -908,6 +918,65 @@ namespace PiercingTool.Editor
                 return new int[] { closestVertex };
 
             return new int[] { triangles[bestTriStart], triangles[bestTriStart + 1], triangles[bestTriStart + 2] };
+        }
+
+        /// <summary>
+        /// ピアス側頂点のワールド重心を計算し、ターゲットメッシュ上の最近傍三角面を自動検出して
+        /// 対応アンカーの targetVertices を上書きする。
+        /// </summary>
+        private static void AutoDetectTargetForAnchor(PiercingSetup setup, int anchorIndex)
+        {
+            if (anchorIndex < 0 || anchorIndex >= setup.anchors.Count) return;
+            var anchor = setup.anchors[anchorIndex];
+            if (anchor.piercingVertices.Count == 0) return;
+            if (setup.targetRenderer == null || setup.targetRenderer.sharedMesh == null) return;
+
+            // ピアス側メッシュの頂点をワールド座標で取得
+            Vector3[] piercingVerts = null;
+            var transform = setup.transform;
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+            {
+                piercingVerts = mf.sharedMesh.vertices;
+            }
+            else
+            {
+                var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (smr != null && smr.sharedMesh != null)
+                {
+                    var bakedMesh = new Mesh();
+                    smr.BakeMesh(bakedMesh);
+                    piercingVerts = bakedMesh.vertices;
+                    Object.DestroyImmediate(bakedMesh);
+                }
+            }
+            if (piercingVerts == null) return;
+
+            // ピアス頂点のワールド重心を計算
+            var sum = Vector3.zero;
+            int count = 0;
+            foreach (int vi in anchor.piercingVertices)
+            {
+                if (vi >= 0 && vi < piercingVerts.Length)
+                {
+                    sum += transform.TransformPoint(piercingVerts[vi]);
+                    count++;
+                }
+            }
+            if (count == 0) return;
+            var centroid = sum / count;
+
+            // ターゲットメッシュから最近傍三角面を検出
+            var worldVerts = BakeWorldVertices(setup.targetRenderer);
+            if (worldVerts == null) return;
+
+            var detected = FindClosestTriangle(
+                worldVerts, setup.targetRenderer.sharedMesh.triangles, centroid);
+
+            Undo.RecordObject(setup, "Auto-detect target vertices");
+            anchor.targetVertices.Clear();
+            anchor.targetVertices.AddRange(detected);
+            EditorUtility.SetDirty(setup);
         }
 
         private static Vector3? ComputeVertexGroupCentroid(List<int> vertices, Vector3[] worldVertices)
