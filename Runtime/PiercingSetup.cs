@@ -3,6 +3,16 @@ using UnityEngine;
 
 namespace PiercingTool
 {
+    [System.Serializable]
+    public class AnchorPair
+    {
+        [Tooltip("Target メッシュ上の参照頂点")]
+        public List<int> targetVertices = new List<int>();
+
+        [Tooltip("ピアスメッシュ上の対応頂点（空なら自動計算）")]
+        public List<int> piercingVertices = new List<int>();
+    }
+
     [AddComponentMenu("Piercing Tool/Piercing Setup")]
     [DisallowMultipleComponent]
     public class PiercingSetup : MonoBehaviour
@@ -38,6 +48,9 @@ namespace PiercingTool
 
         [Tooltip("チェーンのPoint B参照頂点")]
         public List<int> pointBVertices = new List<int>();
+
+        // --- Chain / MultiAnchor 共通 ---
+        public List<AnchorPair> anchors = new List<AnchorPair>();
 
         [Tooltip("PhysBone設定済みの場合、ボーンウェイト転写をスキップ")]
         public bool skipBoneWeightTransfer;

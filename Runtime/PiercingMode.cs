@@ -3,6 +3,7 @@ namespace PiercingTool
     public enum PiercingMode
     {
         Single,
-        Chain
+        Chain,
+        MultiAnchor
     }
 }
