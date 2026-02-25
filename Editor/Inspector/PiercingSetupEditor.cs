@@ -601,6 +601,7 @@ namespace PiercingTool.Editor
             _pickerTool = new VertexPickerTool
             {
                 selectedVertices = vertices,
+                singleSelectMode = usePiercingMesh,
                 onSelectionChanged = () =>
                 {
                     Undo.RecordObject(setup, "Select vertex");

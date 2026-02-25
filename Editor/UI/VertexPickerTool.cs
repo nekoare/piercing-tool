@@ -25,6 +25,11 @@ namespace PiercingTool.Editor
         public List<int> selectedVertices;
         public Action onSelectionChanged;
 
+        /// <summary>
+        /// true の場合、クリックで既存選択をクリアして1頂点のみ保持する。
+        /// </summary>
+        public bool singleSelectMode;
+
         public bool isActive { get; private set; }
 
         private Vector3[] _cachedWorldVertices;
@@ -234,9 +239,18 @@ namespace PiercingTool.Editor
                 if (_hoveredVertex >= 0)
                 {
                     if (e.shift)
+                    {
                         selectedVertices.Remove(_hoveredVertex);
-                    else if (!selectedVertices.Contains(_hoveredVertex))
+                    }
+                    else if (singleSelectMode)
+                    {
+                        selectedVertices.Clear();
                         selectedVertices.Add(_hoveredVertex);
+                    }
+                    else if (!selectedVertices.Contains(_hoveredVertex))
+                    {
+                        selectedVertices.Add(_hoveredVertex);
+                    }
                     onSelectionChanged?.Invoke();
                     e.Use();
                 }
@@ -276,7 +290,9 @@ namespace PiercingTool.Editor
             GUI.Label(new Rect(15, 14, 310, 20),
                 $"頂点選択モード — 選択数: {selectedVertices.Count}", style);
             GUI.Label(new Rect(15, 34, 310, 20),
-                "クリック: 追加 / Shift+クリック: 解除 / Esc: 終了", style);
+                singleSelectMode
+                    ? "クリック: 選択（1頂点のみ）/ Esc: 終了"
+                    : "クリック: 追加 / Shift+クリック: 解除 / Esc: 終了", style);
             Handles.EndGUI();
         }
 
