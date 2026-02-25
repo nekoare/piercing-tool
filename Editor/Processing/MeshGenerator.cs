@@ -70,15 +70,18 @@ namespace PiercingTool.Editor
                     sourceMesh, piercingMesh,
                     refIndicesArr, sourceToPiercing);
             }
-            else
+            else // Chain / MultiAnchor
             {
-                // Chainモード: 従来の重心オフセット補正
-                var combined = new List<int>(setup.pointAVertices);
-                combined.AddRange(setup.pointBVertices);
-                var allRefIndices = combined.ToArray();
+                var anchorIndices = ResolveAnchorIndices(setup);
+                var anchorCentroids = ComputeAnchorCentroids(
+                    setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 
+                // BASE 補正（全アンカーの target 頂点を統合して重心オフセット計算）
+                var allRefIndices = new List<int>();
+                foreach (var indices in anchorIndices)
+                    allRefIndices.AddRange(indices);
                 var blendShapeOffset = ComputeBlendShapeOffsetCentroid(
-                    setup.targetRenderer, sourceMesh, allRefIndices,
+                    setup.targetRenderer, sourceMesh, allRefIndices.ToArray(),
                     setup.savedBlendShapeWeights);
                 if (blendShapeOffset.magnitude > 0.0001f)
                 {
@@ -89,11 +92,12 @@ namespace PiercingTool.Editor
                     piercingMesh.vertices = vertices;
                 }
 
-                transferred = BlendShapeTransferEngine.TransferBlendShapesChain(
+                transferred = BlendShapeTransferEngine.TransferBlendShapesMultiAnchor(
                     sourceMesh, piercingMesh,
-                    setup.pointAVertices.ToArray(),
-                    setup.pointBVertices.ToArray(),
+                    anchorIndices, anchorCentroids,
                     sourceToPiercing);
+
+                resolvedRefIndices = allRefIndices.ToArray();
             }
 
             // ボーンウェイト・bindpose設定
@@ -182,28 +186,17 @@ namespace PiercingTool.Editor
                     sourceMesh, piercingMesh,
                     refIndices, baryWeights);
             }
-            else
+            else // Chain / MultiAnchor
             {
-                var sourceVertices = sourceMesh.vertices;
-                var baseA = BlendShapeTransferEngine.ExtractPositions(
-                    sourceVertices, setup.pointAVertices.ToArray());
-                var baseB = BlendShapeTransferEngine.ExtractPositions(
-                    sourceVertices, setup.pointBVertices.ToArray());
+                var anchorIndices = ResolveAnchorIndices(setup);
+                var anchorCentroids = ComputeAnchorCentroids(
+                    setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 
-                var centroidA = BlendShapeTransferEngine.ComputeCentroid(baseA);
-                var centroidB = BlendShapeTransferEngine.ComputeCentroid(baseB);
+                var segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
+                    piercingMesh.vertices, anchorCentroids);
 
-                // セントロイドをピアス空間に変換してt値を計算
-                var piercingCentroidA = sourceToPiercing.MultiplyPoint3x4(centroidA);
-                var piercingCentroidB = sourceToPiercing.MultiplyPoint3x4(centroidB);
-                var tValues = BlendShapeTransferEngine.ComputeChainTValues(
-                    piercingMesh.vertices, piercingCentroidA, piercingCentroidB);
-
-                BlendShapeTransferEngine.TransferBoneWeightsChain(
-                    sourceMesh, piercingMesh,
-                    setup.pointAVertices.ToArray(),
-                    setup.pointBVertices.ToArray(),
-                    tValues);
+                BlendShapeTransferEngine.TransferBoneWeightsMultiAnchor(
+                    sourceMesh, piercingMesh, anchorIndices, segmentData);
             }
         }
 
@@ -554,6 +547,74 @@ namespace PiercingTool.Editor
             }
 
             mesh.RecalculateBounds();
+        }
+
+        /// <summary>
+        /// PiercingSetup の anchors から処理用の配列を構築する。
+        /// 旧フィールドからのフォールバックも含む。
+        /// </summary>
+        private static int[][] ResolveAnchorIndices(PiercingSetup setup)
+        {
+            if (setup.anchors != null && setup.anchors.Count >= 2)
+            {
+                var result = new int[setup.anchors.Count][];
+                for (int i = 0; i < setup.anchors.Count; i++)
+                    result[i] = setup.anchors[i].targetVertices.ToArray();
+                return result;
+            }
+
+            // 旧フィールドからのフォールバック
+            return new int[][]
+            {
+                setup.pointAVertices.ToArray(),
+                setup.pointBVertices.ToArray()
+            };
+        }
+
+        /// <summary>
+        /// 各アンカーのピアス空間での重心を計算する。
+        /// piercingVertices が指定されていればその重心、なければ target 頂点の重心を変換。
+        /// </summary>
+        private static Vector3[] ComputeAnchorCentroids(
+            PiercingSetup setup, Mesh sourceMesh, Mesh piercingMesh,
+            int[][] anchorIndices, Matrix4x4 sourceToPiercing)
+        {
+            var sourceVertices = sourceMesh.vertices;
+            var piercingVertices = piercingMesh.vertices;
+            int count = anchorIndices.Length;
+            var centroids = new Vector3[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                bool hasPiercingSide = setup.anchors != null &&
+                                       i < setup.anchors.Count &&
+                                       setup.anchors[i].piercingVertices.Count > 0;
+
+                if (hasPiercingSide)
+                {
+                    var pVerts = setup.anchors[i].piercingVertices;
+                    var sum = Vector3.zero;
+                    int validCount = 0;
+                    foreach (int vi in pVerts)
+                    {
+                        if (vi >= 0 && vi < piercingVertices.Length)
+                        {
+                            sum += piercingVertices[vi];
+                            validCount++;
+                        }
+                    }
+                    centroids[i] = validCount > 0 ? sum / validCount : Vector3.zero;
+                }
+                else
+                {
+                    var basePos = BlendShapeTransferEngine.ExtractPositions(
+                        sourceVertices, anchorIndices[i]);
+                    var centroid = BlendShapeTransferEngine.ComputeCentroid(basePos);
+                    centroids[i] = sourceToPiercing.MultiplyPoint3x4(centroid);
+                }
+            }
+
+            return centroids;
         }
 
     }
