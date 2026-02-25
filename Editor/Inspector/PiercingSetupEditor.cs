@@ -744,6 +744,18 @@ namespace PiercingTool.Editor
         private static readonly Color ColorPointB = new Color(1f, 0.5f, 0.8f, 1f);
         private static readonly Color ColorNormal = new Color(0.3f, 0.5f, 1f, 0.9f);
 
+        private static readonly Color[] AnchorColors = new Color[]
+        {
+            new Color(0f, 0.8f, 1f, 1f),   // 青
+            new Color(1f, 0.5f, 0.8f, 1f), // ピンク
+            new Color(0.3f, 1f, 0.3f, 1f), // 緑
+            new Color(1f, 0.8f, 0f, 1f),   // 黄
+            new Color(0.8f, 0.4f, 1f, 1f), // 紫
+            new Color(1f, 0.5f, 0.2f, 1f), // オレンジ
+            new Color(0f, 1f, 0.8f, 1f),   // シアン
+            new Color(1f, 0.3f, 0.3f, 1f), // 赤
+        };
+
         private void DrawSceneVisualization(SceneView sceneView)
         {
             var setup = target as PiercingSetup;
@@ -765,10 +777,40 @@ namespace PiercingTool.Editor
                         ColorAutoSelect, "auto");
                 }
             }
-            else
+            else // Chain / MultiAnchor
             {
-                DrawVertexGroup(setup.pointAVertices, worldVertices, sceneView, ColorPointA, "A");
-                DrawVertexGroup(setup.pointBVertices, worldVertices, sceneView, ColorPointB, "B");
+                var anchors = setup.anchors;
+                if (anchors == null || anchors.Count == 0)
+                {
+                    // 旧フィールドフォールバック
+                    DrawVertexGroup(setup.pointAVertices, worldVertices, sceneView, ColorPointA, "A");
+                    DrawVertexGroup(setup.pointBVertices, worldVertices, sceneView, ColorPointB, "B");
+                    return;
+                }
+
+                // 各アンカーの target 頂点を色分け表示
+                for (int i = 0; i < anchors.Count; i++)
+                {
+                    var color = AnchorColors[i % AnchorColors.Length];
+                    string label = setup.mode == PiercingMode.Chain
+                        ? (i == 0 ? "A" : "B")
+                        : $"{i + 1}";
+                    DrawVertexGroup(anchors[i].targetVertices, worldVertices, sceneView, color, label);
+                }
+
+                // アンカー間をラインで接続（target 側の重心同士）
+                if (anchors.Count >= 2)
+                {
+                    var lineColor = new Color(1f, 1f, 1f, 0.4f);
+                    Handles.color = lineColor;
+                    for (int i = 0; i < anchors.Count - 1; i++)
+                    {
+                        var c0 = ComputeVertexGroupCentroid(anchors[i].targetVertices, worldVertices);
+                        var c1 = ComputeVertexGroupCentroid(anchors[i + 1].targetVertices, worldVertices);
+                        if (c0.HasValue && c1.HasValue)
+                            Handles.DrawDottedLine(c0.Value, c1.Value, 4f);
+                    }
+                }
             }
         }
 
@@ -832,6 +874,22 @@ namespace PiercingTool.Editor
                 return new int[] { closestVertex };
 
             return new int[] { triangles[bestTriStart], triangles[bestTriStart + 1], triangles[bestTriStart + 2] };
+        }
+
+        private static Vector3? ComputeVertexGroupCentroid(List<int> vertices, Vector3[] worldVertices)
+        {
+            if (vertices.Count == 0) return null;
+            var sum = Vector3.zero;
+            int count = 0;
+            foreach (int vi in vertices)
+            {
+                if (vi >= 0 && vi < worldVertices.Length)
+                {
+                    sum += worldVertices[vi];
+                    count++;
+                }
+            }
+            return count > 0 ? sum / count : (Vector3?)null;
         }
 
         private static void DrawVertexGroup(
