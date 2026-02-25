@@ -551,24 +551,16 @@ namespace PiercingTool.Editor
 
         /// <summary>
         /// PiercingSetup の anchors から処理用の配列を構築する。
-        /// 旧フィールドからのフォールバックも含む。
         /// </summary>
         private static int[][] ResolveAnchorIndices(PiercingSetup setup)
         {
-            if (setup.anchors != null && setup.anchors.Count >= 2)
-            {
-                var result = new int[setup.anchors.Count][];
-                for (int i = 0; i < setup.anchors.Count; i++)
-                    result[i] = setup.anchors[i].targetVertices.ToArray();
-                return result;
-            }
+            if (setup.anchors == null || setup.anchors.Count < 2)
+                return new int[0][];
 
-            // 旧フィールドからのフォールバック
-            return new int[][]
-            {
-                setup.pointAVertices.ToArray(),
-                setup.pointBVertices.ToArray()
-            };
+            var result = new int[setup.anchors.Count][];
+            for (int i = 0; i < setup.anchors.Count; i++)
+                result[i] = setup.anchors[i].targetVertices.ToArray();
+            return result;
         }
 
         /// <summary>

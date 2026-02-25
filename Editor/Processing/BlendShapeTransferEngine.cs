@@ -293,36 +293,8 @@ namespace PiercingTool.Editor
         }
 
         // =====================================================================
-        // Chainモード BlendShape転写
+        // Chain / MultiAnchor BlendShape転写
         // =====================================================================
-
-        /// <summary>
-        /// チェーンメッシュの各頂点のt値（Point A=0, Point B=1）を計算する。
-        /// </summary>
-        public static float[] ComputeChainTValues(
-            Vector3[] piercingVertices,
-            Vector3 pointACentroid,
-            Vector3 pointBCentroid)
-        {
-            var axis = pointBCentroid - pointACentroid;
-            float axisSqrMag = axis.sqrMagnitude;
-            var tValues = new float[piercingVertices.Length];
-
-            for (int i = 0; i < piercingVertices.Length; i++)
-            {
-                if (axisSqrMag < 1e-8f)
-                {
-                    tValues[i] = 0.5f;
-                }
-                else
-                {
-                    float t = Vector3.Dot(piercingVertices[i] - pointACentroid, axis) / axisSqrMag;
-                    tValues[i] = Mathf.Clamp01(t);
-                }
-            }
-
-            return tValues;
-        }
 
         /// <summary>
         /// N 個のアンカー重心によるポリラインに対し、各ピアス頂点の
@@ -375,90 +347,6 @@ namespace PiercingTool.Editor
             }
 
             return result;
-        }
-
-        /// <summary>
-        /// Chainモード: 2つの参照頂点群のBlendShapeデルタを補間してピアスメッシュに転写する。
-        /// </summary>
-        public static List<string> TransferBlendShapesChain(
-            Mesh sourceMesh,
-            Mesh piercingMesh,
-            int[] pointAIndices,
-            int[] pointBIndices,
-            Matrix4x4 sourceToPiercingSpace,
-            float deltaThreshold = 0.0001f)
-        {
-            var transferredNames = new List<string>();
-
-            int sourceVertexCount = sourceMesh.vertexCount;
-            int piercingVertexCount = piercingMesh.vertexCount;
-            var piercingVertices = piercingMesh.vertices;
-            var sourceVertices = sourceMesh.vertices;
-
-            var baseA = ExtractPositions(sourceVertices, pointAIndices);
-            var baseB = ExtractPositions(sourceVertices, pointBIndices);
-            var centroidA = ComputeCentroid(baseA);
-            var centroidB = ComputeCentroid(baseB);
-
-            // セントロイドをピアス空間に変換してt値を計算
-            var piercingCentroidA = sourceToPiercingSpace.MultiplyPoint3x4(centroidA);
-            var piercingCentroidB = sourceToPiercingSpace.MultiplyPoint3x4(centroidB);
-            var tValues = ComputeChainTValues(piercingVertices, piercingCentroidA, piercingCentroidB);
-
-            int blendShapeCount = sourceMesh.blendShapeCount;
-            var srcDeltaVertices = new Vector3[sourceVertexCount];
-            var srcDeltaNormals = new Vector3[sourceVertexCount];
-            var srcDeltaTangents = new Vector3[sourceVertexCount];
-
-            for (int si = 0; si < blendShapeCount; si++)
-            {
-                string shapeName = sourceMesh.GetBlendShapeName(si);
-                int frameCount = sourceMesh.GetBlendShapeFrameCount(si);
-
-                sourceMesh.GetBlendShapeFrameVertices(si, frameCount - 1,
-                    srcDeltaVertices, srcDeltaNormals, srcDeltaTangents);
-
-                var deltasA = ExtractPositions(srcDeltaVertices, pointAIndices);
-                var deltasB = ExtractPositions(srcDeltaVertices, pointBIndices);
-                var rigidA = ComputeRigidDelta(baseA, deltasA);
-                var rigidB = ComputeRigidDelta(baseB, deltasB);
-
-                // 閾値チェック（ソース空間で判定）
-                bool aSignificant = rigidA.position.magnitude >= deltaThreshold ||
-                                    Quaternion.Angle(rigidA.rotation, Quaternion.identity) >= 0.01f;
-                bool bSignificant = rigidB.position.magnitude >= deltaThreshold ||
-                                    Quaternion.Angle(rigidB.rotation, Quaternion.identity) >= 0.01f;
-                if (!aSignificant && !bSignificant)
-                    continue;
-
-                // ソース空間→ピアス空間に変換
-                var transformedA = TransformRigidDelta(rigidA, sourceToPiercingSpace);
-                var transformedB = TransformRigidDelta(rigidB, sourceToPiercingSpace);
-
-                var piercingDeltas = new Vector3[piercingVertexCount];
-                var piercingNormalDeltas = new Vector3[piercingVertexCount];
-                var piercingTangentDeltas = new Vector3[piercingVertexCount];
-
-                for (int vi = 0; vi < piercingVertexCount; vi++)
-                {
-                    float t = tValues[vi];
-                    var pos = Vector3.Lerp(transformedA.position, transformedB.position, t);
-                    var rot = Quaternion.Slerp(transformedA.rotation, transformedB.rotation, t);
-
-                    // t値に応じて回転ピボットも補間
-                    var pivot = Vector3.Lerp(piercingCentroidA, piercingCentroidB, t);
-                    var localPos = piercingVertices[vi] - pivot;
-                    piercingDeltas[vi] = rot * localPos - localPos + pos;
-                }
-
-                float frameWeight = sourceMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
-                piercingMesh.AddBlendShapeFrame(shapeName, frameWeight,
-                    piercingDeltas, piercingNormalDeltas, piercingTangentDeltas);
-
-                transferredNames.Add(shapeName);
-            }
-
-            return transferredNames;
         }
 
         /// <summary>
@@ -607,65 +495,6 @@ namespace PiercingTool.Editor
 
             var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
             var allWeightsNative = new NativeArray<BoneWeight1>(allWeights, Allocator.Temp);
-            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
-            bonesPerVertexNative.Dispose();
-            allWeightsNative.Dispose();
-        }
-
-        /// <summary>
-        /// Chainモード: t値に基づいてPoint AとPoint Bのウェイトを補間して適用する。
-        /// </summary>
-        public static void TransferBoneWeightsChain(
-            Mesh sourceMesh, Mesh piercingMesh,
-            int[] pointAIndices, int[] pointBIndices,
-            float[] tValues)
-        {
-            var weightsA = ComputeAverageBoneWeights(sourceMesh, pointAIndices);
-            var weightsB = ComputeAverageBoneWeights(sourceMesh, pointBIndices);
-
-            var allBoneIndices = new HashSet<int>();
-            foreach (var kvp in weightsA) allBoneIndices.Add(kvp.Key);
-            foreach (var kvp in weightsB) allBoneIndices.Add(kvp.Key);
-
-            int piercingVertexCount = piercingMesh.vertexCount;
-            var bonesPerVertex = new byte[piercingVertexCount];
-            var allWeightsList = new List<BoneWeight1>();
-
-            for (int vi = 0; vi < piercingVertexCount; vi++)
-            {
-                float t = tValues[vi];
-                var interpolated = new List<BoneWeight1>();
-                float totalWeight = 0;
-
-                foreach (int boneIdx in allBoneIndices)
-                {
-                    weightsA.TryGetValue(boneIdx, out float wA);
-                    weightsB.TryGetValue(boneIdx, out float wB);
-                    float w = Mathf.Lerp(wA, wB, t);
-                    if (w > 0.001f)
-                    {
-                        interpolated.Add(new BoneWeight1 { boneIndex = boneIdx, weight = w });
-                        totalWeight += w;
-                    }
-                }
-
-                // 正規化・ソート・上位4つに制限
-                for (int i = 0; i < interpolated.Count; i++)
-                {
-                    var bw = interpolated[i];
-                    bw.weight /= totalWeight;
-                    interpolated[i] = bw;
-                }
-                interpolated.Sort((a, b) => b.weight.CompareTo(a.weight));
-                if (interpolated.Count > 4)
-                    interpolated.RemoveRange(4, interpolated.Count - 4);
-
-                bonesPerVertex[vi] = (byte)interpolated.Count;
-                allWeightsList.AddRange(interpolated);
-            }
-
-            var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
-            var allWeightsNative = new NativeArray<BoneWeight1>(allWeightsList.ToArray(), Allocator.Temp);
             piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
             bonesPerVertexNative.Dispose();
             allWeightsNative.Dispose();

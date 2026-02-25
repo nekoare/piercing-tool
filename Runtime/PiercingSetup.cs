@@ -42,13 +42,6 @@ namespace PiercingTool
         [HideInInspector]
         public Mesh originalMesh;
 
-        // --- Chain mode ---
-        [Tooltip("チェーンのPoint A参照頂点")]
-        public List<int> pointAVertices = new List<int>();
-
-        [Tooltip("チェーンのPoint B参照頂点")]
-        public List<int> pointBVertices = new List<int>();
-
         // --- Chain / MultiAnchor 共通 ---
         public List<AnchorPair> anchors = new List<AnchorPair>();
 

@@ -20,7 +20,6 @@ namespace PiercingTool.Editor
         private enum PickerTarget
         {
             Single,
-            PointA, PointB, // kept temporarily for compatibility
             AnchorTarget0, AnchorTarget1, AnchorTarget2, AnchorTarget3,
             AnchorTarget4, AnchorTarget5, AnchorTarget6, AnchorTarget7,
             AnchorPiercing0, AnchorPiercing1, AnchorPiercing2, AnchorPiercing3,
@@ -667,10 +666,8 @@ namespace PiercingTool.Editor
                 return true; // 参照頂点が空の場合は自動選択される
             else // Chain / MultiAnchor
             {
-                if (setup.anchors != null && setup.anchors.Count >= 2)
-                    return setup.anchors.All(a => a.targetVertices.Count > 0);
-                // 旧フィールドフォールバック
-                return setup.pointAVertices.Count > 0 && setup.pointBVertices.Count > 0;
+                return setup.anchors != null && setup.anchors.Count >= 2 &&
+                       setup.anchors.All(a => a.targetVertices.Count > 0);
             }
         }
 
@@ -740,8 +737,6 @@ namespace PiercingTool.Editor
         private static readonly Color ColorGood = new Color(0f, 1f, 0.5f, 1f);
         private static readonly Color ColorDegenerate = new Color(1f, 0.4f, 0f, 1f);
         private static readonly Color ColorAutoSelect = new Color(1f, 0.85f, 0f, 1f);
-        private static readonly Color ColorPointA = new Color(0f, 0.8f, 1f, 1f);
-        private static readonly Color ColorPointB = new Color(1f, 0.5f, 0.8f, 1f);
         private static readonly Color ColorNormal = new Color(0.3f, 0.5f, 1f, 0.9f);
 
         private static readonly Color[] AnchorColors = new Color[]
@@ -780,13 +775,7 @@ namespace PiercingTool.Editor
             else // Chain / MultiAnchor
             {
                 var anchors = setup.anchors;
-                if (anchors == null || anchors.Count == 0)
-                {
-                    // 旧フィールドフォールバック
-                    DrawVertexGroup(setup.pointAVertices, worldVertices, sceneView, ColorPointA, "A");
-                    DrawVertexGroup(setup.pointBVertices, worldVertices, sceneView, ColorPointB, "B");
-                    return;
-                }
+                if (anchors == null || anchors.Count == 0) return;
 
                 // 各アンカーの target 頂点を色分け表示
                 for (int i = 0; i < anchors.Count; i++)
