@@ -73,6 +73,10 @@ namespace PiercingTool.Editor
             else // Chain / MultiAnchor
             {
                 var anchorIndices = ResolveAnchorIndices(setup);
+                if (anchorIndices.Length < 2)
+                    throw new System.InvalidOperationException(
+                        "Chain/MultiAnchor モードには2つ以上のアンカーが必要です。");
+
                 var anchorCentroids = ComputeAnchorCentroids(
                     setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 
@@ -189,6 +193,8 @@ namespace PiercingTool.Editor
             else // Chain / MultiAnchor
             {
                 var anchorIndices = ResolveAnchorIndices(setup);
+                if (anchorIndices.Length < 2) return;
+
                 var anchorCentroids = ComputeAnchorCentroids(
                     setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 

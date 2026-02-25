@@ -17,6 +17,8 @@ namespace PiercingTool.Editor
 
         private VertexPickerTool _pickerTool;
 
+        private const int MaxAnchorCount = 8;
+
         private enum PickerTarget
         {
             Single,
@@ -437,11 +439,13 @@ namespace PiercingTool.Editor
             _pickerTool.Activate();
         }
 
-        private void DrawAnchorSection(string label, int anchorIndex, PiercingSetup setup)
+        private void DrawAnchorSection(string label, int anchorIndex, PiercingSetup setup,
+            bool showLabel = true)
         {
             var anchor = setup.anchors[anchorIndex];
 
-            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            if (showLabel)
+                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
             using (new EditorGUI.IndentLevelScope())
             {
                 // Target 頂点
@@ -604,8 +608,13 @@ namespace PiercingTool.Editor
         {
             if (setup.anchors == null)
                 setup.anchors = new List<AnchorPair>();
-            while (setup.anchors.Count < minCount)
-                setup.anchors.Add(new AnchorPair());
+            if (setup.anchors.Count < minCount)
+            {
+                Undo.RecordObject(setup, "Initialize anchors");
+                while (setup.anchors.Count < minCount)
+                    setup.anchors.Add(new AnchorPair());
+                EditorUtility.SetDirty(setup);
+            }
         }
 
         private void DrawMultiAnchorUI(PiercingSetup setup)
@@ -630,18 +639,21 @@ namespace PiercingTool.Editor
                     }
                 }
 
-                DrawAnchorSection($"Anchor {i + 1}", i, setup);
+                DrawAnchorSection($"Anchor {i + 1}", i, setup, showLabel: false);
                 EditorGUILayout.Space();
             }
 
-            // アンカー追加ボタン
+            // アンカー追加ボタン（PickerTarget enum の上限に合わせて最大8個）
             if (!setup.isPositionSaved)
             {
-                if (GUILayout.Button("+ アンカーを追加"))
+                using (new EditorGUI.DisabledScope(setup.anchors.Count >= MaxAnchorCount))
                 {
-                    Undo.RecordObject(setup, "Add anchor");
-                    setup.anchors.Add(new AnchorPair());
-                    EditorUtility.SetDirty(setup);
+                    if (GUILayout.Button("+ アンカーを追加"))
+                    {
+                        Undo.RecordObject(setup, "Add anchor");
+                        setup.anchors.Add(new AnchorPair());
+                        EditorUtility.SetDirty(setup);
+                    }
                 }
             }
 
