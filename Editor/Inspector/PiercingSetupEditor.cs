@@ -611,8 +611,45 @@ namespace PiercingTool.Editor
 
         private void DrawMultiAnchorUI(PiercingSetup setup)
         {
-            // Placeholder for Task 6
-            EditorGUILayout.HelpBox("MultiAnchor UI - Coming soon", MessageType.Info);
+            for (int i = 0; i < setup.anchors.Count; i++)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField($"Anchor {i + 1}", EditorStyles.boldLabel);
+
+                    // 削除ボタン（2個未満にはできない）
+                    using (new EditorGUI.DisabledScope(
+                        setup.isPositionSaved || setup.anchors.Count <= 2))
+                    {
+                        if (GUILayout.Button("\u00d7", GUILayout.Width(22)))
+                        {
+                            Undo.RecordObject(setup, "Remove anchor");
+                            setup.anchors.RemoveAt(i);
+                            EditorUtility.SetDirty(setup);
+                            break;
+                        }
+                    }
+                }
+
+                DrawAnchorSection($"Anchor {i + 1}", i, setup);
+                EditorGUILayout.Space();
+            }
+
+            // アンカー追加ボタン
+            if (!setup.isPositionSaved)
+            {
+                if (GUILayout.Button("+ アンカーを追加"))
+                {
+                    Undo.RecordObject(setup, "Add anchor");
+                    setup.anchors.Add(new AnchorPair());
+                    EditorUtility.SetDirty(setup);
+                }
+            }
+
+            EditorGUILayout.Space();
+            EditorGUILayout.PropertyField(_skipBoneWeightTransfer,
+                new GUIContent("ボーンウェイト転写をスキップ",
+                    "PhysBone設定済みの場合にチェック"));
         }
 
         private bool IsReadyToGenerate(PiercingSetup setup)
