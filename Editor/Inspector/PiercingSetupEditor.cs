@@ -60,6 +60,11 @@ namespace PiercingTool.Editor
             public Vector3[] originalVertices;
             public float[] lastWeights;
             public Mesh originalSharedMesh;
+
+            // Chain/MultiAnchor 用: プレビュー初期化時に計算し、毎フレーム再利用
+            public int[][] anchorIndices;
+            public Vector3[] anchorCentroids;
+            public (int segmentIndex, float localT)[] segmentData;
         }
 
         private static readonly Dictionary<int, PreviewState> s_previews =
@@ -1101,14 +1106,21 @@ namespace PiercingTool.Editor
         private static bool UpdatePreviewForSetup(PiercingSetup setup, PreviewState state)
         {
             if (setup.targetRenderer == null) return false;
-            if (setup.mode != PiercingMode.Single) return false;
 
             var renderer = setup.targetRenderer;
             var sourceMesh = renderer.sharedMesh;
             if (sourceMesh == null) return false;
 
-            var refIndices = setup.referenceVertices;
-            if (refIndices.Count == 0) return false;
+            // モード別の事前チェック
+            if (setup.mode == PiercingMode.Single)
+            {
+                if (setup.referenceVertices.Count == 0) return false;
+            }
+            else // Chain / MultiAnchor
+            {
+                if (setup.anchors == null || setup.anchors.Count < 2) return false;
+                if (!setup.anchors.All(a => a.targetVertices.Count > 0)) return false;
+            }
 
             // BlendShape weight 変更検知
             int blendShapeCount = sourceMesh.blendShapeCount;
@@ -1145,10 +1157,20 @@ namespace PiercingTool.Editor
                 state.previewMesh.hideFlags = HideFlags.HideAndDontSave;
                 state.originalVertices = state.previewMesh.vertices;
                 mf.sharedMesh = state.previewMesh;
+
+                // Chain/MultiAnchor: セグメントデータを初期化（1回のみ）
+                if (setup.mode != PiercingMode.Single)
+                {
+                    InitSegmentDataForPreview(setup, sourceMesh, state);
+                }
             }
 
             // 剛体変換を計算して頂点に適用
-            ApplyRigidPreview(setup, sourceMesh, state);
+            if (setup.mode == PiercingMode.Single)
+                ApplyRigidPreview(setup, sourceMesh, state);
+            else
+                ApplySegmentPreview(setup, sourceMesh, state);
+
             return true;
         }
 
@@ -1202,6 +1224,168 @@ namespace PiercingTool.Editor
             var vertices = new Vector3[state.originalVertices.Length];
             for (int i = 0; i < vertices.Length; i++)
                 vertices[i] = rotation * (state.originalVertices[i] - savedCentroid) + currentCentroid;
+
+            state.previewMesh.vertices = vertices;
+            state.previewMesh.RecalculateBounds();
+        }
+
+        /// <summary>
+        /// Chain/MultiAnchor プレビュー用: セグメントデータを初期化する。
+        /// プレビューメッシュ作成時に1回だけ呼ばれる。
+        /// </summary>
+        private static void InitSegmentDataForPreview(
+            PiercingSetup setup, Mesh sourceMesh, PreviewState state)
+        {
+            var renderer = setup.targetRenderer;
+            var sourceToPiercing = setup.transform.worldToLocalMatrix *
+                                   renderer.transform.localToWorldMatrix;
+
+            // anchorIndices を構築
+            int anchorCount = setup.anchors.Count;
+            state.anchorIndices = new int[anchorCount][];
+            for (int i = 0; i < anchorCount; i++)
+                state.anchorIndices[i] = setup.anchors[i].targetVertices.ToArray();
+
+            // アンカー重心をピアス空間で計算（保存時のBlendShape状態で）
+            var savedSourceVerts = sourceMesh.vertices;
+            // 保存時のBlendShapeによる変位を加算
+            if (setup.savedBlendShapeWeights != null)
+            {
+                var deformedVerts = new Vector3[savedSourceVerts.Length];
+                System.Array.Copy(savedSourceVerts, deformedVerts, savedSourceVerts.Length);
+                var deltaV = new Vector3[savedSourceVerts.Length];
+                var deltaN = new Vector3[savedSourceVerts.Length];
+                var deltaT = new Vector3[savedSourceVerts.Length];
+                for (int si = 0; si < sourceMesh.blendShapeCount; si++)
+                {
+                    float w = si < setup.savedBlendShapeWeights.Length
+                        ? setup.savedBlendShapeWeights[si] : 0f;
+                    if (Mathf.Abs(w) < 0.01f) continue;
+                    int fc = sourceMesh.GetBlendShapeFrameCount(si);
+                    float fw = sourceMesh.GetBlendShapeFrameWeight(si, fc - 1);
+                    sourceMesh.GetBlendShapeFrameVertices(si, fc - 1, deltaV, deltaN, deltaT);
+                    float scale = fw != 0f ? w / fw : 0f;
+                    for (int vi = 0; vi < deformedVerts.Length; vi++)
+                        deformedVerts[vi] += deltaV[vi] * scale;
+                }
+                savedSourceVerts = deformedVerts;
+            }
+
+            state.anchorCentroids = new Vector3[anchorCount];
+            for (int a = 0; a < anchorCount; a++)
+            {
+                bool hasPiercingSide = a < setup.anchors.Count &&
+                                       setup.anchors[a].piercingVertices.Count > 0;
+                if (hasPiercingSide)
+                {
+                    var pVerts = setup.anchors[a].piercingVertices;
+                    var piercingVertices = state.originalVertices;
+                    var sum = Vector3.zero;
+                    int count = 0;
+                    foreach (int vi in pVerts)
+                    {
+                        if (vi < piercingVertices.Length)
+                        {
+                            sum += piercingVertices[vi];
+                            count++;
+                        }
+                    }
+                    state.anchorCentroids[a] = count > 0 ? sum / count : Vector3.zero;
+                }
+                else
+                {
+                    // target 頂点の保存時位置をピアス空間に変換して重心を計算
+                    var sum = Vector3.zero;
+                    foreach (int vi in state.anchorIndices[a])
+                    {
+                        if (vi < savedSourceVerts.Length)
+                            sum += sourceToPiercing.MultiplyPoint3x4(savedSourceVerts[vi]);
+                    }
+                    state.anchorCentroids[a] = state.anchorIndices[a].Length > 0
+                        ? sum / state.anchorIndices[a].Length : Vector3.zero;
+                }
+            }
+
+            // 各ピアス頂点のセグメント割り当てを計算
+            state.segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
+                state.originalVertices, state.anchorCentroids);
+        }
+
+        /// <summary>
+        /// Chain/MultiAnchor プレビュー: 各アンカーの剛体デルタをセグメント補間して適用する。
+        /// </summary>
+        private static void ApplySegmentPreview(
+            PiercingSetup setup, Mesh sourceMesh, PreviewState state)
+        {
+            if (state.anchorIndices == null || state.segmentData == null) return;
+
+            var renderer = setup.targetRenderer;
+            var sourceToPiercing = setup.transform.worldToLocalMatrix *
+                                   renderer.transform.localToWorldMatrix;
+
+            int anchorCount = state.anchorIndices.Length;
+            var sourceVertices = sourceMesh.vertices;
+
+            // 各アンカーの saved/current 位置をピアス空間で計算
+            var savedDeltas = new (Vector3 translation, Quaternion rotation)[anchorCount];
+
+            for (int a = 0; a < anchorCount; a++)
+            {
+                var indices = state.anchorIndices[a];
+
+                // 保存時位置（ピアス空間）
+                var savedPos = MeshGenerator.ComputeDeformedRefPositions(
+                    renderer, sourceMesh, indices, setup.savedBlendShapeWeights);
+                var savedPiercing = new Vector3[indices.Length];
+                for (int i = 0; i < indices.Length; i++)
+                    savedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(savedPos[i]);
+
+                // 現在位置（ピアス空間）
+                var currentPos = MeshGenerator.ComputeDeformedRefPositions(
+                    renderer, sourceMesh, indices, null);
+                var currentPiercing = new Vector3[indices.Length];
+                for (int i = 0; i < indices.Length; i++)
+                    currentPiercing[i] = sourceToPiercing.MultiplyPoint3x4(currentPos[i]);
+
+                // 剛体デルタ（回転 + 平行移動）
+                Quaternion rotation;
+                if (indices.Length == 3)
+                {
+                    rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                        savedPiercing[0], savedPiercing[1], savedPiercing[2],
+                        currentPiercing[0], currentPiercing[1], currentPiercing[2]);
+                }
+                else
+                {
+                    var deltas = new Vector3[indices.Length];
+                    for (int i = 0; i < deltas.Length; i++)
+                        deltas[i] = currentPiercing[i] - savedPiercing[i];
+                    rotation = BlendShapeTransferEngine.ComputeRigidDelta(
+                        savedPiercing, deltas).rotation;
+                }
+
+                var savedCentroid = BlendShapeTransferEngine.ComputeCentroid(savedPiercing);
+                var currentCentroid = BlendShapeTransferEngine.ComputeCentroid(currentPiercing);
+                var translation = currentCentroid - savedCentroid;
+
+                savedDeltas[a] = (translation, rotation);
+            }
+
+            // 各ピアス頂点にセグメント補間で適用
+            var vertices = new Vector3[state.originalVertices.Length];
+            for (int vi = 0; vi < vertices.Length; vi++)
+            {
+                var (seg, t) = state.segmentData[vi];
+                int a0 = seg;
+                int a1 = Mathf.Min(seg + 1, anchorCount - 1);
+
+                var rot = Quaternion.Slerp(savedDeltas[a0].rotation, savedDeltas[a1].rotation, t);
+                var trans = Vector3.Lerp(savedDeltas[a0].translation, savedDeltas[a1].translation, t);
+                var pivot = Vector3.Lerp(state.anchorCentroids[a0], state.anchorCentroids[a1], t);
+
+                var localPos = state.originalVertices[vi] - pivot;
+                vertices[vi] = rot * localPos + pivot + trans;
+            }
 
             state.previewMesh.vertices = vertices;
             state.previewMesh.RecalculateBounds();
