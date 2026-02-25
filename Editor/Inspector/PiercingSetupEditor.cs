@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -16,7 +17,22 @@ namespace PiercingTool.Editor
 
         private VertexPickerTool _pickerTool;
 
-        private enum PickerTarget { Single, PointA, PointB }
+        private enum PickerTarget
+        {
+            Single,
+            PointA, PointB, // kept temporarily for compatibility
+            AnchorTarget0, AnchorTarget1, AnchorTarget2, AnchorTarget3,
+            AnchorTarget4, AnchorTarget5, AnchorTarget6, AnchorTarget7,
+            AnchorPiercing0, AnchorPiercing1, AnchorPiercing2, AnchorPiercing3,
+            AnchorPiercing4, AnchorPiercing5, AnchorPiercing6, AnchorPiercing7,
+        }
+
+        private static PickerTarget AnchorTargetPicker(int index)
+            => (PickerTarget)((int)PickerTarget.AnchorTarget0 + index);
+
+        private static PickerTarget AnchorPiercingPicker(int index)
+            => (PickerTarget)((int)PickerTarget.AnchorPiercing0 + index);
+
         private PickerTarget _activePickerTarget;
 
         /// <summary>
@@ -219,15 +235,25 @@ namespace PiercingTool.Editor
                         "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
                         "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
             }
-            else
+            else if (setup.mode == PiercingMode.Chain)
             {
-                DrawVertexSection("Point A", setup.pointAVertices, PickerTarget.PointA, setup);
-                EditorGUILayout.Space();
-                DrawVertexSection("Point B", setup.pointBVertices, PickerTarget.PointB, setup);
+                EnsureMinAnchors(setup, 2);
+
+                for (int i = 0; i < setup.anchors.Count && i < 2; i++)
+                {
+                    string anchorLabel = i == 0 ? "Anchor A" : "Anchor B";
+                    DrawAnchorSection(anchorLabel, i, setup);
+                }
+
                 EditorGUILayout.Space();
                 EditorGUILayout.PropertyField(_skipBoneWeightTransfer,
                     new GUIContent("ボーンウェイト転写をスキップ",
                         "PhysBone設定済みの場合にチェック"));
+            }
+            else if (setup.mode == PiercingMode.MultiAnchor)
+            {
+                EnsureMinAnchors(setup, 2);
+                DrawMultiAnchorUI(setup);
             }
 
             EditorGUILayout.Space(10);
@@ -412,6 +438,183 @@ namespace PiercingTool.Editor
             _pickerTool.Activate();
         }
 
+        private void DrawAnchorSection(string label, int anchorIndex, PiercingSetup setup)
+        {
+            var anchor = setup.anchors[anchorIndex];
+
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            using (new EditorGUI.IndentLevelScope())
+            {
+                // Target 頂点
+                DrawVertexListForAnchor(
+                    "Target頂点", anchor.targetVertices,
+                    AnchorTargetPicker(anchorIndex), setup,
+                    setup.targetRenderer);
+
+                // ピアス側指定（Chain モードではオプション）
+                if (setup.mode == PiercingMode.Chain)
+                {
+                    bool showPiercing = anchor.piercingVertices.Count > 0;
+                    bool newShowPiercing = EditorGUILayout.Toggle(
+                        "ピアス側も指定する", showPiercing);
+
+                    if (newShowPiercing && !showPiercing)
+                    {
+                        // 有効化
+                    }
+                    else if (!newShowPiercing && showPiercing)
+                    {
+                        Undo.RecordObject(setup, "Clear piercing vertices");
+                        anchor.piercingVertices.Clear();
+                        EditorUtility.SetDirty(setup);
+                    }
+
+                    if (newShowPiercing || anchor.piercingVertices.Count > 0)
+                    {
+                        DrawVertexListForAnchor(
+                            "Piercing頂点", anchor.piercingVertices,
+                            AnchorPiercingPicker(anchorIndex), setup,
+                            null, usePiercingMesh: true);
+                    }
+                }
+                else // MultiAnchor — piercing 必須
+                {
+                    DrawVertexListForAnchor(
+                        "Piercing頂点", anchor.piercingVertices,
+                        AnchorPiercingPicker(anchorIndex), setup,
+                        null, usePiercingMesh: true);
+                }
+            }
+        }
+
+        private void DrawVertexListForAnchor(
+            string label, List<int> vertices,
+            PickerTarget pickerTarget, PiercingSetup setup,
+            SkinnedMeshRenderer renderer,
+            bool usePiercingMesh = false)
+        {
+            EditorGUILayout.LabelField($"{label}: {vertices.Count}個");
+
+            // 頂点リスト表示
+            if (vertices.Count > 0)
+            {
+                Vector3[] sourceVerts = null;
+                if (usePiercingMesh)
+                {
+                    var mf = setup.GetComponent<MeshFilter>();
+                    if (mf != null && mf.sharedMesh != null)
+                        sourceVerts = mf.sharedMesh.vertices;
+                }
+                else if (renderer != null && renderer.sharedMesh != null)
+                {
+                    sourceVerts = renderer.sharedMesh.vertices;
+                }
+
+                if (sourceVerts != null)
+                {
+                    int removeIndex = -1;
+                    for (int i = 0; i < vertices.Count; i++)
+                    {
+                        int vi = vertices[i];
+                        using (new EditorGUILayout.HorizontalScope())
+                        {
+                            string posStr = vi < sourceVerts.Length
+                                ? sourceVerts[vi].ToString("F3") : "(invalid)";
+                            EditorGUILayout.LabelField($"  #{vi}  {posStr}");
+                            if (!setup.isPositionSaved &&
+                                GUILayout.Button("\u00d7", GUILayout.Width(22)))
+                                removeIndex = i;
+                        }
+                    }
+                    if (removeIndex >= 0)
+                    {
+                        Undo.RecordObject(setup, "Remove vertex");
+                        vertices.RemoveAt(removeIndex);
+                        EditorUtility.SetDirty(setup);
+                    }
+                }
+            }
+
+            // ピッカーボタン
+            if (!setup.isPositionSaved)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    bool isActive = _pickerTool != null &&
+                                    _pickerTool.isActive &&
+                                    _activePickerTarget == pickerTarget;
+                    string btnText = isActive ? "選択中..." : "選択";
+                    var btnStyle = isActive
+                        ? new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold }
+                        : GUI.skin.button;
+
+                    if (GUILayout.Button(btnText, btnStyle))
+                    {
+                        if (isActive)
+                            _pickerTool.Deactivate();
+                        else
+                            StartAnchorPicker(setup, vertices, pickerTarget, usePiercingMesh);
+                    }
+
+                    if (GUILayout.Button("クリア", GUILayout.Width(50)))
+                    {
+                        Undo.RecordObject(setup, "Clear vertices");
+                        vertices.Clear();
+                        EditorUtility.SetDirty(setup);
+                    }
+                }
+            }
+        }
+
+        private void StartAnchorPicker(
+            PiercingSetup setup, List<int> vertices,
+            PickerTarget pickerTarget, bool usePiercingMesh)
+        {
+            _pickerTool?.Deactivate();
+
+            _activePickerTarget = pickerTarget;
+            _pickerTool = new VertexPickerTool
+            {
+                selectedVertices = vertices,
+                onSelectionChanged = () =>
+                {
+                    Undo.RecordObject(setup, "Select vertex");
+                    EditorUtility.SetDirty(setup);
+                    Repaint();
+                }
+            };
+
+            if (usePiercingMesh)
+            {
+                _pickerTool.meshFilter = setup.GetComponent<MeshFilter>();
+            }
+            else
+            {
+                if (setup.targetRenderer == null)
+                {
+                    EditorUtility.DisplayDialog("エラー", "対象Rendererを設定してください。", "OK");
+                    return;
+                }
+                _pickerTool.targetRenderer = setup.targetRenderer;
+            }
+
+            _pickerTool.Activate();
+        }
+
+        private static void EnsureMinAnchors(PiercingSetup setup, int minCount)
+        {
+            if (setup.anchors == null)
+                setup.anchors = new List<AnchorPair>();
+            while (setup.anchors.Count < minCount)
+                setup.anchors.Add(new AnchorPair());
+        }
+
+        private void DrawMultiAnchorUI(PiercingSetup setup)
+        {
+            // Placeholder for Task 6
+            EditorGUILayout.HelpBox("MultiAnchor UI - Coming soon", MessageType.Info);
+        }
+
         private bool IsReadyToGenerate(PiercingSetup setup)
         {
             if (setup.targetRenderer == null) return false;
@@ -425,8 +628,13 @@ namespace PiercingTool.Editor
 
             if (setup.mode == PiercingMode.Single)
                 return true; // 参照頂点が空の場合は自動選択される
-            else
+            else // Chain / MultiAnchor
+            {
+                if (setup.anchors != null && setup.anchors.Count >= 2)
+                    return setup.anchors.All(a => a.targetVertices.Count > 0);
+                // 旧フィールドフォールバック
                 return setup.pointAVertices.Count > 0 && setup.pointBVertices.Count > 0;
+            }
         }
 
         private void UnsavePosition(PiercingSetup setup)
@@ -979,24 +1187,25 @@ namespace PiercingTool.Editor
                     var quality = EvaluateVertexQuality(sourceVerts, setup.referenceVertices);
                     DrawVertexQualityWarning(quality);
                 }
-                else if (setup.mode == PiercingMode.Chain)
+                else if (setup.mode == PiercingMode.Chain || setup.mode == PiercingMode.MultiAnchor)
                 {
-                    if (setup.pointAVertices.Count >= 2)
+                    if (setup.anchors != null)
                     {
-                        var qa = EvaluateVertexQuality(sourceVerts, setup.pointAVertices);
-                        if (qa != VertexQuality.Ok)
+                        for (int i = 0; i < setup.anchors.Count; i++)
                         {
-                            EditorGUILayout.HelpBox(
-                                $"Point A: {GetQualityMessage(qa)}", MessageType.Warning);
-                        }
-                    }
-                    if (setup.pointBVertices.Count >= 2)
-                    {
-                        var qb = EvaluateVertexQuality(sourceVerts, setup.pointBVertices);
-                        if (qb != VertexQuality.Ok)
-                        {
-                            EditorGUILayout.HelpBox(
-                                $"Point B: {GetQualityMessage(qb)}", MessageType.Warning);
+                            var av = setup.anchors[i].targetVertices;
+                            if (av.Count >= 2)
+                            {
+                                var qa = EvaluateVertexQuality(sourceVerts, av);
+                                if (qa != VertexQuality.Ok)
+                                {
+                                    string anchorLabel = setup.mode == PiercingMode.Chain
+                                        ? (i == 0 ? "Anchor A" : "Anchor B")
+                                        : $"Anchor {i + 1}";
+                                    EditorGUILayout.HelpBox(
+                                        $"{anchorLabel}: {GetQualityMessage(qa)}", MessageType.Warning);
+                                }
+                            }
                         }
                     }
                 }
