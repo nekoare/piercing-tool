@@ -15,6 +15,13 @@ namespace PiercingTool.Editor
     public class VertexPickerTool
     {
         public SkinnedMeshRenderer targetRenderer;
+
+        /// <summary>
+        /// SkinnedMeshRenderer の代わりに MeshFilter からピッキングする場合に設定。
+        /// targetRenderer が null で meshFilter が非 null のとき使用される。
+        /// </summary>
+        public MeshFilter meshFilter;
+
         public List<int> selectedVertices;
         public Action onSelectionChanged;
 
@@ -42,7 +49,8 @@ namespace PiercingTool.Editor
 
         public void Activate()
         {
-            if (targetRenderer == null || selectedVertices == null) return;
+            if (targetRenderer == null && meshFilter == null) return;
+            if (selectedVertices == null) return;
             isActive = true;
             UpdateCachedVertices();
             SetupCollider();
@@ -72,14 +80,26 @@ namespace PiercingTool.Editor
         {
             CleanupCollider();
 
-            _colliderMesh = new Mesh { hideFlags = HideFlags.HideAndDontSave };
-            targetRenderer.BakeMesh(_colliderMesh);
+            Transform parentTransform;
+            if (targetRenderer != null)
+            {
+                _colliderMesh = new Mesh { hideFlags = HideFlags.HideAndDontSave };
+                targetRenderer.BakeMesh(_colliderMesh);
+                parentTransform = targetRenderer.transform;
+            }
+            else if (meshFilter != null && meshFilter.sharedMesh != null)
+            {
+                _colliderMesh = UnityEngine.Object.Instantiate(meshFilter.sharedMesh);
+                _colliderMesh.hideFlags = HideFlags.HideAndDontSave;
+                parentTransform = meshFilter.transform;
+            }
+            else return;
 
             _colliderGO = new GameObject("__PiercingTool_ZTest__")
             {
                 hideFlags = HideFlags.HideAndDontSave
             };
-            _colliderGO.transform.SetParent(targetRenderer.transform, false);
+            _colliderGO.transform.SetParent(parentTransform, false);
 
             _meshCollider = _colliderGO.AddComponent<MeshCollider>();
             _meshCollider.hideFlags = HideFlags.HideAndDontSave;
@@ -108,17 +128,32 @@ namespace PiercingTool.Editor
 
         private void UpdateCachedVertices()
         {
-            if (targetRenderer == null) return;
-            var bakedMesh = new Mesh();
-            targetRenderer.BakeMesh(bakedMesh);
+            Mesh mesh = null;
+            Transform meshTransform = null;
+            bool needsDestroy = false;
 
-            var localVertices = bakedMesh.vertices;
-            var rendererTransform = targetRenderer.transform;
+            if (targetRenderer != null)
+            {
+                mesh = new Mesh();
+                targetRenderer.BakeMesh(mesh);
+                meshTransform = targetRenderer.transform;
+                needsDestroy = true;
+            }
+            else if (meshFilter != null && meshFilter.sharedMesh != null)
+            {
+                mesh = meshFilter.sharedMesh;
+                meshTransform = meshFilter.transform;
+            }
+
+            if (mesh == null || meshTransform == null) return;
+
+            var localVertices = mesh.vertices;
             _cachedWorldVertices = new Vector3[localVertices.Length];
             for (int i = 0; i < localVertices.Length; i++)
-                _cachedWorldVertices[i] = rendererTransform.TransformPoint(localVertices[i]);
+                _cachedWorldVertices[i] = meshTransform.TransformPoint(localVertices[i]);
 
-            UnityEngine.Object.DestroyImmediate(bakedMesh);
+            if (needsDestroy)
+                UnityEngine.Object.DestroyImmediate(mesh);
         }
 
         private void EnsureMaterials()
