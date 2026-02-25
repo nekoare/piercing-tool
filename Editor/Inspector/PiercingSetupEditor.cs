@@ -37,6 +37,12 @@ namespace PiercingTool.Editor
         private PickerTarget _activePickerTarget;
 
         /// <summary>
+        /// Chain モードで「ピアス側も指定する」トグルの ON 状態を保持する。
+        /// piercingVertices が空でもトグルが戻らないようにするためのエディタ限定状態。
+        /// </summary>
+        private readonly HashSet<int> _showPiercingForAnchor = new HashSet<int>();
+
+        /// <summary>
         /// Single モードで referenceVertices が空のとき、現在の位置から自動検出した頂点。
         /// Inspector/SceneView 表示用の一時キャッシュ（コンポーネントには保存しない）。
         /// </summary>
@@ -457,19 +463,24 @@ namespace PiercingTool.Editor
                 // ピアス側指定（Chain モードではオプション）
                 if (setup.mode == PiercingMode.Chain)
                 {
-                    bool showPiercing = anchor.piercingVertices.Count > 0;
+                    bool showPiercing = anchor.piercingVertices.Count > 0 ||
+                                        _showPiercingForAnchor.Contains(anchorIndex);
                     bool newShowPiercing = EditorGUILayout.Toggle(
                         "ピアス側も指定する", showPiercing);
 
                     if (newShowPiercing && !showPiercing)
                     {
-                        // 有効化
+                        _showPiercingForAnchor.Add(anchorIndex);
                     }
                     else if (!newShowPiercing && showPiercing)
                     {
-                        Undo.RecordObject(setup, "Clear piercing vertices");
-                        anchor.piercingVertices.Clear();
-                        EditorUtility.SetDirty(setup);
+                        _showPiercingForAnchor.Remove(anchorIndex);
+                        if (anchor.piercingVertices.Count > 0)
+                        {
+                            Undo.RecordObject(setup, "Clear piercing vertices");
+                            anchor.piercingVertices.Clear();
+                            EditorUtility.SetDirty(setup);
+                        }
                     }
 
                     if (newShowPiercing || anchor.piercingVertices.Count > 0)
