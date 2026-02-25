@@ -325,6 +325,59 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// N 個のアンカー重心によるポリラインに対し、各ピアス頂点の
+        /// (所属セグメントインデックス, セグメント内ローカルt) を計算する。
+        /// </summary>
+        public static (int segmentIndex, float localT)[] ComputeSegmentTValues(
+            Vector3[] piercingVertices,
+            Vector3[] anchorCentroids)
+        {
+            int anchorCount = anchorCentroids.Length;
+            int vertexCount = piercingVertices.Length;
+            var result = new (int, float)[vertexCount];
+
+            if (anchorCount < 2)
+            {
+                for (int i = 0; i < vertexCount; i++)
+                    result[i] = (0, 0f);
+                return result;
+            }
+
+            for (int vi = 0; vi < vertexCount; vi++)
+            {
+                var p = piercingVertices[vi];
+                float bestDistSq = float.MaxValue;
+                int bestSeg = 0;
+                float bestT = 0f;
+
+                for (int seg = 0; seg < anchorCount - 1; seg++)
+                {
+                    var a = anchorCentroids[seg];
+                    var b = anchorCentroids[seg + 1];
+                    var ab = b - a;
+                    float abSqrMag = ab.sqrMagnitude;
+
+                    float t = abSqrMag < 1e-8f ? 0f
+                        : Mathf.Clamp01(Vector3.Dot(p - a, ab) / abSqrMag);
+
+                    var projected = a + ab * t;
+                    float distSq = (p - projected).sqrMagnitude;
+
+                    if (distSq < bestDistSq)
+                    {
+                        bestDistSq = distSq;
+                        bestSeg = seg;
+                        bestT = t;
+                    }
+                }
+
+                result[vi] = (bestSeg, bestT);
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Chainモード: 2つの参照頂点群のBlendShapeデルタを補間してピアスメッシュに転写する。
         /// </summary>
         public static List<string> TransferBlendShapesChain(
@@ -394,6 +447,118 @@ namespace PiercingTool.Editor
 
                     // t値に応じて回転ピボットも補間
                     var pivot = Vector3.Lerp(piercingCentroidA, piercingCentroidB, t);
+                    var localPos = piercingVertices[vi] - pivot;
+                    piercingDeltas[vi] = rot * localPos - localPos + pos;
+                }
+
+                float frameWeight = sourceMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
+                piercingMesh.AddBlendShapeFrame(shapeName, frameWeight,
+                    piercingDeltas, piercingNormalDeltas, piercingTangentDeltas);
+
+                transferredNames.Add(shapeName);
+            }
+
+            return transferredNames;
+        }
+
+        /// <summary>
+        /// N点アンカー版: 各アンカーの剛体デルタをセグメント補間してピアスメッシュに転写する。
+        /// </summary>
+        public static List<string> TransferBlendShapesMultiAnchor(
+            Mesh sourceMesh,
+            Mesh piercingMesh,
+            int[][] anchorIndices,
+            Vector3[] anchorCentroids,
+            Matrix4x4 sourceToPiercingSpace,
+            float deltaThreshold = 0.0001f)
+        {
+            var transferredNames = new List<string>();
+            int anchorCount = anchorIndices.Length;
+            int sourceVertexCount = sourceMesh.vertexCount;
+            int piercingVertexCount = piercingMesh.vertexCount;
+            var piercingVertices = piercingMesh.vertices;
+            var sourceVertices = sourceMesh.vertices;
+
+            // 各アンカーの参照頂点ベース位置をピアス空間に変換
+            var anchorBasePiercing = new Vector3[anchorCount][];
+            for (int a = 0; a < anchorCount; a++)
+            {
+                var baseSrc = ExtractPositions(sourceVertices, anchorIndices[a]);
+                anchorBasePiercing[a] = new Vector3[baseSrc.Length];
+                for (int i = 0; i < baseSrc.Length; i++)
+                    anchorBasePiercing[a][i] = sourceToPiercingSpace.MultiplyPoint3x4(baseSrc[i]);
+            }
+
+            var segmentData = ComputeSegmentTValues(piercingVertices, anchorCentroids);
+
+            int blendShapeCount = sourceMesh.blendShapeCount;
+            var srcDeltaVertices = new Vector3[sourceVertexCount];
+            var srcDeltaNormals = new Vector3[sourceVertexCount];
+            var srcDeltaTangents = new Vector3[sourceVertexCount];
+
+            for (int si = 0; si < blendShapeCount; si++)
+            {
+                string shapeName = sourceMesh.GetBlendShapeName(si);
+                int frameCount = sourceMesh.GetBlendShapeFrameCount(si);
+
+                sourceMesh.GetBlendShapeFrameVertices(si, frameCount - 1,
+                    srcDeltaVertices, srcDeltaNormals, srcDeltaTangents);
+
+                // 各アンカーの剛体デルタを計算（ピアス空間）
+                var anchorRotations = new Quaternion[anchorCount];
+                var anchorTranslations = new Vector3[anchorCount];
+                bool anySignificant = false;
+
+                for (int a = 0; a < anchorCount; a++)
+                {
+                    var deformedPiercing = new Vector3[anchorIndices[a].Length];
+                    var deltasPiercing = new Vector3[anchorIndices[a].Length];
+
+                    for (int i = 0; i < anchorIndices[a].Length; i++)
+                    {
+                        int idx = anchorIndices[a][i];
+                        var deformedSrc = sourceVertices[idx] + srcDeltaVertices[idx];
+                        deformedPiercing[i] = sourceToPiercingSpace.MultiplyPoint3x4(deformedSrc);
+                        deltasPiercing[i] = deformedPiercing[i] - anchorBasePiercing[a][i];
+                    }
+
+                    Quaternion rotation;
+                    if (anchorIndices[a].Length == 3)
+                    {
+                        rotation = ComputeTriangleFrameRotation(
+                            anchorBasePiercing[a][0], anchorBasePiercing[a][1], anchorBasePiercing[a][2],
+                            deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                    }
+                    else
+                    {
+                        rotation = ComputeRigidDelta(anchorBasePiercing[a], deltasPiercing).rotation;
+                    }
+
+                    var translation = ComputeCentroid(deltasPiercing);
+                    anchorRotations[a] = rotation;
+                    anchorTranslations[a] = translation;
+
+                    if (translation.magnitude >= deltaThreshold ||
+                        Quaternion.Angle(rotation, Quaternion.identity) >= 0.01f)
+                        anySignificant = true;
+                }
+
+                if (!anySignificant) continue;
+
+                var piercingDeltas = new Vector3[piercingVertexCount];
+                var piercingNormalDeltas = new Vector3[piercingVertexCount];
+                var piercingTangentDeltas = new Vector3[piercingVertexCount];
+
+                for (int vi = 0; vi < piercingVertexCount; vi++)
+                {
+                    var (seg, t) = segmentData[vi];
+                    int a0 = seg;
+                    int a1 = Mathf.Min(seg + 1, anchorCount - 1);
+
+                    var pos = Vector3.Lerp(anchorTranslations[a0], anchorTranslations[a1], t);
+                    var rot = Quaternion.Slerp(anchorRotations[a0], anchorRotations[a1], t);
+                    var pivot = Vector3.Lerp(anchorCentroids[a0], anchorCentroids[a1], t);
+
                     var localPos = piercingVertices[vi] - pivot;
                     piercingDeltas[vi] = rot * localPos - localPos + pos;
                 }
@@ -485,6 +650,71 @@ namespace PiercingTool.Editor
                 }
 
                 // 正規化・ソート・上位4つに制限
+                for (int i = 0; i < interpolated.Count; i++)
+                {
+                    var bw = interpolated[i];
+                    bw.weight /= totalWeight;
+                    interpolated[i] = bw;
+                }
+                interpolated.Sort((a, b) => b.weight.CompareTo(a.weight));
+                if (interpolated.Count > 4)
+                    interpolated.RemoveRange(4, interpolated.Count - 4);
+
+                bonesPerVertex[vi] = (byte)interpolated.Count;
+                allWeightsList.AddRange(interpolated);
+            }
+
+            var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
+            var allWeightsNative = new NativeArray<BoneWeight1>(allWeightsList.ToArray(), Allocator.Temp);
+            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
+            bonesPerVertexNative.Dispose();
+            allWeightsNative.Dispose();
+        }
+
+        /// <summary>
+        /// N点アンカー版: セグメント補間でボーンウェイトを適用する。
+        /// </summary>
+        public static void TransferBoneWeightsMultiAnchor(
+            Mesh sourceMesh, Mesh piercingMesh,
+            int[][] anchorIndices,
+            (int segmentIndex, float localT)[] segmentData)
+        {
+            int anchorCount = anchorIndices.Length;
+
+            var anchorWeights = new Dictionary<int, float>[anchorCount];
+            for (int a = 0; a < anchorCount; a++)
+                anchorWeights[a] = ComputeAverageBoneWeights(sourceMesh, anchorIndices[a]);
+
+            var allBoneIndices = new HashSet<int>();
+            foreach (var w in anchorWeights)
+                foreach (var kvp in w)
+                    allBoneIndices.Add(kvp.Key);
+
+            int piercingVertexCount = piercingMesh.vertexCount;
+            var bonesPerVertex = new byte[piercingVertexCount];
+            var allWeightsList = new List<BoneWeight1>();
+
+            for (int vi = 0; vi < piercingVertexCount; vi++)
+            {
+                var (seg, t) = segmentData[vi];
+                int a0 = seg;
+                int a1 = Mathf.Min(seg + 1, anchorCount - 1);
+
+                var interpolated = new List<BoneWeight1>();
+                float totalWeight = 0;
+
+                foreach (int boneIdx in allBoneIndices)
+                {
+                    anchorWeights[a0].TryGetValue(boneIdx, out float w0);
+                    anchorWeights[a1].TryGetValue(boneIdx, out float w1);
+                    float w = Mathf.Lerp(w0, w1, t);
+                    if (w > 0.001f)
+                    {
+                        interpolated.Add(new BoneWeight1 { boneIndex = boneIdx, weight = w });
+                        totalWeight += w;
+                    }
+                }
+
                 for (int i = 0; i < interpolated.Count; i++)
                 {
                     var bw = interpolated[i];
