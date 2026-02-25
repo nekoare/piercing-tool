@@ -153,12 +153,34 @@ namespace PiercingTool.Editor
             PiercingSetup setup, Mesh sourceMesh, Mesh piercingMesh,
             int[] resolvedRefIndices, Matrix4x4 sourceToPiercing)
         {
-            if (setup.mode == PiercingMode.Single)
+            if (setup.mode == PiercingMode.Single && setup.perVertexBoneWeights)
+            {
+                // 頂点ごとのウェイト転写: 各ピアス頂点にソースメッシュの最寄り面から補間
+                var piercingToSource = sourceToPiercing.inverse;
+                BlendShapeTransferEngine.TransferBoneWeightsPerVertex(
+                    sourceMesh, piercingMesh, piercingToSource);
+            }
+            else if (setup.mode == PiercingMode.Single)
             {
                 var refIndices = resolvedRefIndices ?? setup.referenceVertices.ToArray();
+
+                // 3頂点の場合、ピアス取付位置のバリセントリック座標で補間
+                float[] baryWeights = null;
+                if (refIndices.Length == 3)
+                {
+                    var deformedRefPos = ComputeDeformedRefPositions(
+                        setup.targetRenderer, sourceMesh, refIndices,
+                        setup.savedBlendShapeWeights);
+                    var attachLocal = setup.targetRenderer.transform
+                        .InverseTransformPoint(setup.transform.position);
+                    var bary = BlendShapeTransferEngine.ComputeBarycentricCoords(
+                        attachLocal, deformedRefPos[0], deformedRefPos[1], deformedRefPos[2]);
+                    baryWeights = new float[] { bary.x, bary.y, bary.z };
+                }
+
                 BlendShapeTransferEngine.TransferBoneWeightsSingle(
                     sourceMesh, piercingMesh,
-                    refIndices);
+                    refIndices, baryWeights);
             }
             else
             {

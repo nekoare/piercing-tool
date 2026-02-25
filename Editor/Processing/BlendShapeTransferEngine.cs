@@ -413,13 +413,20 @@ namespace PiercingTool.Editor
         // =====================================================================
 
         /// <summary>
-        /// Singleモード: 参照頂点のボーンウェイトを加重平均してピアス全頂点に適用する。
+        /// Singleモード: 参照頂点のボーンウェイトを補間してピアス全頂点に適用する。
+        /// referenceWeightsが指定された場合はバリセントリック補間、未指定の場合は単純平均を使用する。
         /// </summary>
         public static void TransferBoneWeightsSingle(
-            Mesh sourceMesh, Mesh piercingMesh, int[] referenceIndices)
+            Mesh sourceMesh, Mesh piercingMesh, int[] referenceIndices,
+            float[] referenceWeights = null)
         {
-            var averaged = ComputeAverageBoneWeights(sourceMesh, referenceIndices);
-            var sorted = NormalizeAndSort(averaged);
+            Dictionary<int, float> weighted;
+            if (referenceWeights != null && referenceWeights.Length == referenceIndices.Length)
+                weighted = ComputeWeightedBoneWeights(sourceMesh, referenceIndices, referenceWeights);
+            else
+                weighted = ComputeAverageBoneWeights(sourceMesh, referenceIndices);
+
+            var sorted = NormalizeAndSort(weighted);
 
             int piercingVertexCount = piercingMesh.vertexCount;
             byte boneCount = (byte)Mathf.Min(sorted.Count, 4);
@@ -500,6 +507,117 @@ namespace PiercingTool.Editor
         }
 
         // =====================================================================
+        // 頂点ごとのボーンウェイト転写
+        // =====================================================================
+
+        /// <summary>
+        /// ピアスの各頂点に対し、ソースメッシュ上の最寄り三角面からバリセントリック補間した
+        /// ボーンウェイトを個別に適用する。体表面の変形に追従するため、
+        /// 変形が大きい部位（へそ・胸など）に有効。
+        /// </summary>
+        public static void TransferBoneWeightsPerVertex(
+            Mesh sourceMesh, Mesh piercingMesh, Matrix4x4 piercingToSourceSpace)
+        {
+            var sourceVertices = sourceMesh.vertices;
+            var sourceTriangles = sourceMesh.triangles;
+            var piercingVertices = piercingMesh.vertices;
+            int piercingVertexCount = piercingMesh.vertexCount;
+
+            var bonesPerVertex = new byte[piercingVertexCount];
+            var allWeightsList = new List<BoneWeight1>();
+
+            for (int vi = 0; vi < piercingVertexCount; vi++)
+            {
+                // ピアス頂点をソースメッシュ空間に変換
+                var posInSource = piercingToSourceSpace.MultiplyPoint3x4(piercingVertices[vi]);
+
+                // 最寄りの三角面を検索
+                int bestTriStart = FindNearestTriangle(
+                    posInSource, sourceVertices, sourceTriangles);
+
+                // バリセントリック座標からウェイトを補間
+                Dictionary<int, float> weighted;
+                if (bestTriStart >= 0)
+                {
+                    int i0 = sourceTriangles[bestTriStart];
+                    int i1 = sourceTriangles[bestTriStart + 1];
+                    int i2 = sourceTriangles[bestTriStart + 2];
+                    var bary = ComputeBarycentricCoords(
+                        posInSource, sourceVertices[i0], sourceVertices[i1], sourceVertices[i2]);
+                    weighted = ComputeWeightedBoneWeights(
+                        sourceMesh, new[] { i0, i1, i2 },
+                        new[] { bary.x, bary.y, bary.z });
+                }
+                else
+                {
+                    // フォールバック: 最寄り頂点のウェイトをそのまま使用
+                    int nearest = FindNearestVertex(posInSource, sourceVertices);
+                    weighted = ComputeWeightedBoneWeights(
+                        sourceMesh, new[] { nearest }, new[] { 1f });
+                }
+
+                var sorted = NormalizeAndSort(weighted);
+                bonesPerVertex[vi] = (byte)sorted.Count;
+                allWeightsList.AddRange(sorted);
+            }
+
+            var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
+            var allWeightsNative = new NativeArray<BoneWeight1>(allWeightsList.ToArray(), Allocator.Temp);
+            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
+            bonesPerVertexNative.Dispose();
+            allWeightsNative.Dispose();
+        }
+
+        /// <summary>
+        /// 指定点に最も近い三角面のインデックス（triangles配列内の開始位置）を返す。
+        /// 見つからない場合は-1。
+        /// </summary>
+        private static int FindNearestTriangle(
+            Vector3 point, Vector3[] vertices, int[] triangles)
+        {
+            float bestDistSq = float.MaxValue;
+            int bestTriStart = -1;
+
+            for (int i = 0; i < triangles.Length; i += 3)
+            {
+                Vector3 v0 = vertices[triangles[i]];
+                Vector3 v1 = vertices[triangles[i + 1]];
+                Vector3 v2 = vertices[triangles[i + 2]];
+
+                // 三角面の重心までの距離で近似（高速化のため）
+                Vector3 centroid = (v0 + v1 + v2) / 3f;
+                float distSq = (point - centroid).sqrMagnitude;
+
+                if (distSq < bestDistSq)
+                {
+                    bestDistSq = distSq;
+                    bestTriStart = i;
+                }
+            }
+
+            return bestTriStart;
+        }
+
+        /// <summary>最寄りの頂点インデックスを返す。</summary>
+        private static int FindNearestVertex(Vector3 point, Vector3[] vertices)
+        {
+            float bestDistSq = float.MaxValue;
+            int best = 0;
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                float distSq = (point - vertices[i]).sqrMagnitude;
+                if (distSq < bestDistSq)
+                {
+                    bestDistSq = distSq;
+                    best = i;
+                }
+            }
+
+            return best;
+        }
+
+        // =====================================================================
         // ユーティリティ
         // =====================================================================
 
@@ -517,6 +635,38 @@ namespace PiercingTool.Editor
             for (int i = 0; i < positions.Length; i++)
                 sum += positions[i];
             return positions.Length > 0 ? sum / positions.Length : Vector3.zero;
+        }
+
+        /// <summary>
+        /// 参照頂点のボーンウェイトを指定の重みで加重平均する（バリセントリック補間用）。
+        /// </summary>
+        private static Dictionary<int, float> ComputeWeightedBoneWeights(
+            Mesh mesh, int[] indices, float[] vertexWeights)
+        {
+            var sourceWeights = mesh.GetAllBoneWeights();
+            var sourceBonesPerVertex = mesh.GetBonesPerVertex();
+            var weightMap = new Dictionary<int, float>();
+
+            for (int j = 0; j < indices.Length; j++)
+            {
+                int vi = indices[j];
+                float vertWeight = vertexWeights[j];
+
+                int offset = 0;
+                for (int i = 0; i < vi; i++)
+                    offset += sourceBonesPerVertex[i];
+
+                int count = sourceBonesPerVertex[vi];
+                for (int i = 0; i < count; i++)
+                {
+                    var bw = sourceWeights[offset + i];
+                    if (!weightMap.ContainsKey(bw.boneIndex))
+                        weightMap[bw.boneIndex] = 0;
+                    weightMap[bw.boneIndex] += bw.weight * vertWeight;
+                }
+            }
+
+            return weightMap;
         }
 
         private static Dictionary<int, float> ComputeAverageBoneWeights(Mesh mesh, int[] indices)
@@ -545,6 +695,40 @@ namespace PiercingTool.Editor
                 weightMap[key] /= indices.Length;
 
             return weightMap;
+        }
+
+        /// <summary>
+        /// 点pの三角形(v0,v1,v2)上のバリセントリック座標を計算する。
+        /// pは三角形平面に射影される。退化三角形の場合は等分(1/3,1/3,1/3)を返す。
+        /// 返り値は (v0の重み, v1の重み, v2の重み) で合計1.0。
+        /// </summary>
+        public static Vector3 ComputeBarycentricCoords(
+            Vector3 p, Vector3 v0, Vector3 v1, Vector3 v2)
+        {
+            Vector3 e0 = v1 - v0;
+            Vector3 e1 = v2 - v0;
+            Vector3 ep = p - v0;
+
+            float d00 = Vector3.Dot(e0, e0);
+            float d01 = Vector3.Dot(e0, e1);
+            float d11 = Vector3.Dot(e1, e1);
+            float dp0 = Vector3.Dot(ep, e0);
+            float dp1 = Vector3.Dot(ep, e1);
+
+            float denom = d00 * d11 - d01 * d01;
+            if (Mathf.Abs(denom) < 1e-10f)
+                return new Vector3(1f / 3f, 1f / 3f, 1f / 3f);
+
+            float v = (d11 * dp0 - d01 * dp1) / denom;
+            float w = (d00 * dp1 - d01 * dp0) / denom;
+            float u = 1f - v - w;
+
+            // 三角形外にはみ出た場合はクランプして正規化
+            u = Mathf.Max(0f, u);
+            v = Mathf.Max(0f, v);
+            w = Mathf.Max(0f, w);
+            float sum = u + v + w;
+            return new Vector3(u / sum, v / sum, w / sum);
         }
 
         private static List<BoneWeight1> NormalizeAndSort(Dictionary<int, float> weightMap)

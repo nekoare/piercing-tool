@@ -12,11 +12,18 @@ namespace PiercingTool.Editor
         private SerializedProperty _mode;
         private SerializedProperty _targetRenderer;
         private SerializedProperty _skipBoneWeightTransfer;
+        private SerializedProperty _perVertexBoneWeights;
 
         private VertexPickerTool _pickerTool;
 
         private enum PickerTarget { Single, PointA, PointB }
         private PickerTarget _activePickerTarget;
+
+        /// <summary>
+        /// Single モードで referenceVertices が空のとき、現在の位置から自動検出した頂点。
+        /// Inspector/SceneView 表示用の一時キャッシュ（コンポーネントには保存しない）。
+        /// </summary>
+        private int[] _autoDetectedVertices;
 
         // =================================================================
         // Static BlendShape追従プレビュー
@@ -39,8 +46,12 @@ namespace PiercingTool.Editor
         private static readonly Dictionary<int, Mesh> s_originalMeshes =
             new Dictionary<int, Mesh>();
 
+        // ドメインリロード後の初回更新で自動復元を行うためのフラグ
+        private static bool s_needsRestore = true;
+
         static PiercingSetupEditor()
         {
+            s_needsRestore = true;
             EditorApplication.update += StaticUpdatePreviews;
             EditorSceneManager.sceneSaving += OnSceneSaving;
             EditorSceneManager.sceneSaved += OnSceneSaved;
@@ -79,12 +90,44 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// ドメインリロード後（Play→Edit復帰、Unity再起動、スクリプト再コンパイル）に
+        /// isPositionSaved な PiercingSetup のプレビューを自動再登録する。
+        /// </summary>
+        private static void RestorePreviewsAfterReload()
+        {
+            // Play Mode中はプレビューを復元しない
+            if (EditorApplication.isPlayingOrWillChangePlaymode) return;
+
+            var setups = Object.FindObjectsOfType<PiercingSetup>();
+            foreach (var setup in setups)
+            {
+                if (!setup.isPositionSaved) continue;
+                if (s_previews.ContainsKey(setup.GetInstanceID())) continue;
+
+                // ドメインリロードで static 辞書が消えた後、MeshFilter が
+                // 古いプレビューメッシュ(HideAndDontSave)を指している場合がある。
+                // シリアライズ済みの originalMesh から元メッシュを復元する。
+                var mf = setup.GetComponent<MeshFilter>();
+                if (mf != null && setup.originalMesh != null &&
+                    mf.sharedMesh != setup.originalMesh)
+                {
+                    mf.sharedMesh = setup.originalMesh;
+                }
+
+                RegisterPreview(setup);
+            }
+        }
+
+        /// <summary>
         /// Play Mode遷移前にプレビューを全解除（NDMFがクローンする前に元メッシュを復元する）。
+        /// Play Mode→Edit復帰時にプレビューを遅延復元する。
         /// </summary>
         private static void OnPlayModeChanged(PlayModeStateChange change)
         {
             if (change == PlayModeStateChange.ExitingEditMode)
                 CleanupAllPreviews();
+            else if (change == PlayModeStateChange.EnteredEditMode)
+                EditorApplication.delayCall += RestorePreviewsAfterReload;
         }
 
         /// <summary>
@@ -122,6 +165,7 @@ namespace PiercingTool.Editor
             _mode = serializedObject.FindProperty("mode");
             _targetRenderer = serializedObject.FindProperty("targetRenderer");
             _skipBoneWeightTransfer = serializedObject.FindProperty("skipBoneWeightTransfer");
+            _perVertexBoneWeights = serializedObject.FindProperty("perVertexBoneWeights");
             SceneView.duringSceneGui += DrawSceneVisualization;
         }
 
@@ -145,10 +189,35 @@ namespace PiercingTool.Editor
             EditorGUILayout.PropertyField(_targetRenderer, new GUIContent("対象Renderer"));
             EditorGUILayout.Space();
 
-            // --- 頂点選択 ---
+            // --- 自動検出キャッシュ更新（Single + 未保存 + 手動選択なし） ---
+            if (setup.mode == PiercingMode.Single &&
+                !setup.isPositionSaved &&
+                setup.referenceVertices.Count == 0 &&
+                setup.targetRenderer != null &&
+                setup.targetRenderer.sharedMesh != null)
+            {
+                var worldVerts = BakeWorldVertices(setup.targetRenderer);
+                if (worldVerts != null)
+                {
+                    _autoDetectedVertices = FindClosestTriangle(
+                        worldVerts, setup.targetRenderer.sharedMesh.triangles,
+                        setup.transform.position);
+                }
+            }
+            else
+            {
+                _autoDetectedVertices = null;
+            }
+
+            // --- 頂点選択（保存中は読み取り専用） ---
             if (setup.mode == PiercingMode.Single)
             {
                 DrawVertexSection("参照頂点", setup.referenceVertices, PickerTarget.Single, setup);
+                EditorGUILayout.Space();
+                EditorGUILayout.PropertyField(_perVertexBoneWeights,
+                    new GUIContent("体表面に追従",
+                        "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
+                        "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
             }
             else
             {
@@ -163,20 +232,28 @@ namespace PiercingTool.Editor
 
             EditorGUILayout.Space(10);
 
-            // --- 位置を保存ボタン ---
-            using (new EditorGUI.DisabledScope(!IsReadyToGenerate(setup)))
+            // --- 位置を保存 / 解除ボタン ---
+            if (setup.isPositionSaved)
             {
-                string buttonLabel = setup.isPositionSaved ? "位置を保存（保存済み）" : "位置を保存";
-                if (GUILayout.Button(buttonLabel, GUILayout.Height(30)))
+                // Toggle(true, ..., "Button") で押下状態の見た目にする
+                if (!GUILayout.Toggle(true, "保存を解除", "Button", GUILayout.Height(30)))
+                    UnsavePosition(setup);
+            }
+            else
+            {
+                using (new EditorGUI.DisabledScope(!IsReadyToGenerate(setup)))
                 {
-                    try
+                    if (GUILayout.Button("位置を保存", GUILayout.Height(30)))
                     {
-                        SavePosition(setup);
-                    }
-                    catch (System.Exception e)
-                    {
-                        EditorUtility.DisplayDialog("エラー", e.Message, "OK");
-                        Debug.LogException(e);
+                        try
+                        {
+                            SavePosition(setup);
+                        }
+                        catch (System.Exception e)
+                        {
+                            EditorUtility.DisplayDialog("エラー", e.Message, "OK");
+                            Debug.LogException(e);
+                        }
                     }
                 }
             }
@@ -194,66 +271,117 @@ namespace PiercingTool.Editor
 
             using (new EditorGUI.IndentLevelScope())
             {
-                EditorGUILayout.LabelField($"選択数: {vertices.Count}");
+                // 手動選択がある場合はそれを表示、なければ自動検出を表示
+                bool showingAuto = vertices.Count == 0 && _autoDetectedVertices != null &&
+                                   pickerTarget == PickerTarget.Single;
 
-                // 選択頂点リスト
-                if (vertices.Count > 0 && setup.targetRenderer != null &&
-                    setup.targetRenderer.sharedMesh != null)
+                if (showingAuto)
                 {
-                    var sourceVertices = setup.targetRenderer.sharedMesh.vertices;
-                    int removeIndex = -1;
+                    EditorGUILayout.LabelField("選択数: 自動検出");
 
-                    for (int i = 0; i < vertices.Count; i++)
+                    // 自動検出頂点をグレーで表示
+                    if (setup.targetRenderer != null && setup.targetRenderer.sharedMesh != null)
                     {
-                        int vi = vertices[i];
-                        using (new EditorGUILayout.HorizontalScope())
+                        var sourceVertices = setup.targetRenderer.sharedMesh.vertices;
+                        var prevColor = GUI.color;
+                        GUI.color = new Color(1f, 1f, 1f, 0.5f);
+                        foreach (int vi in _autoDetectedVertices)
                         {
                             string posStr = vi < sourceVertices.Length
                                 ? sourceVertices[vi].ToString("F3")
                                 : "(invalid)";
                             EditorGUILayout.LabelField($"  #{vi}  {posStr}");
-                            if (GUILayout.Button("\u00d7", GUILayout.Width(22)))
-                                removeIndex = i;
                         }
+                        GUI.color = prevColor;
                     }
+                }
+                else
+                {
+                    EditorGUILayout.LabelField($"選択数: {vertices.Count}");
 
-                    if (removeIndex >= 0)
+                    // 選択頂点リスト
+                    if (vertices.Count > 0 && setup.targetRenderer != null &&
+                        setup.targetRenderer.sharedMesh != null)
                     {
-                        Undo.RecordObject(setup, "Remove vertex");
-                        vertices.RemoveAt(removeIndex);
-                        EditorUtility.SetDirty(setup);
+                        var sourceVertices = setup.targetRenderer.sharedMesh.vertices;
+                        int removeIndex = -1;
+
+                        for (int i = 0; i < vertices.Count; i++)
+                        {
+                            int vi = vertices[i];
+                            using (new EditorGUILayout.HorizontalScope())
+                            {
+                                string posStr = vi < sourceVertices.Length
+                                    ? sourceVertices[vi].ToString("F3")
+                                    : "(invalid)";
+                                EditorGUILayout.LabelField($"  #{vi}  {posStr}");
+                                if (!setup.isPositionSaved &&
+                                    GUILayout.Button("\u00d7", GUILayout.Width(22)))
+                                    removeIndex = i;
+                            }
+                        }
+
+                        if (removeIndex >= 0)
+                        {
+                            Undo.RecordObject(setup, "Remove vertex");
+                            vertices.RemoveAt(removeIndex);
+                            EditorUtility.SetDirty(setup);
+                        }
                     }
                 }
 
-                // ピッカーボタン
-                using (new EditorGUILayout.HorizontalScope())
+                // ピッカーボタン（保存中は非表示）
+                if (!setup.isPositionSaved)
                 {
-                    bool isThisPickerActive = _pickerTool != null &&
-                                              _pickerTool.isActive &&
-                                              _activePickerTarget == pickerTarget;
-
-                    string buttonText = isThisPickerActive ? "選択中..." : "頂点を選択";
-                    var buttonStyle = isThisPickerActive
-                        ? new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold }
-                        : GUI.skin.button;
-
-                    if (GUILayout.Button(buttonText, buttonStyle))
+                    using (new EditorGUILayout.HorizontalScope())
                     {
-                        if (isThisPickerActive)
+                        bool isThisPickerActive = _pickerTool != null &&
+                                                  _pickerTool.isActive &&
+                                                  _activePickerTarget == pickerTarget;
+
+                        string buttonText = isThisPickerActive ? "選択中..." : "頂点を選択";
+                        var buttonStyle = isThisPickerActive
+                            ? new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold }
+                            : GUI.skin.button;
+
+                        if (GUILayout.Button(buttonText, buttonStyle))
                         {
-                            _pickerTool.Deactivate();
+                            if (isThisPickerActive)
+                            {
+                                _pickerTool.Deactivate();
+                            }
+                            else
+                            {
+                                StartPicker(setup, vertices, pickerTarget);
+                            }
                         }
-                        else
+
+                        if (GUILayout.Button("クリア", GUILayout.Width(50)))
                         {
-                            StartPicker(setup, vertices, pickerTarget);
+                            Undo.RecordObject(setup, "Clear vertices");
+                            vertices.Clear();
+                            EditorUtility.SetDirty(setup);
                         }
                     }
 
-                    if (GUILayout.Button("クリア", GUILayout.Width(50)))
+                    // 自動選択をやり直すボタン（Single + 手動選択がある場合のみ）
+                    if (pickerTarget == PickerTarget.Single && vertices.Count > 0 &&
+                        setup.targetRenderer != null && setup.targetRenderer.sharedMesh != null)
                     {
-                        Undo.RecordObject(setup, "Clear vertices");
-                        vertices.Clear();
-                        EditorUtility.SetDirty(setup);
+                        if (GUILayout.Button("現在の位置で自動選択をやり直す"))
+                        {
+                            var worldVerts = BakeWorldVertices(setup.targetRenderer);
+                            if (worldVerts != null)
+                            {
+                                var auto = FindClosestTriangle(
+                                    worldVerts, setup.targetRenderer.sharedMesh.triangles,
+                                    setup.transform.position);
+                                Undo.RecordObject(setup, "Re-detect vertices");
+                                vertices.Clear();
+                                vertices.AddRange(auto);
+                                EditorUtility.SetDirty(setup);
+                            }
+                        }
                     }
                 }
             }
@@ -301,6 +429,27 @@ namespace PiercingTool.Editor
                 return setup.pointAVertices.Count > 0 && setup.pointBVertices.Count > 0;
         }
 
+        private void UnsavePosition(PiercingSetup setup)
+        {
+            Undo.RecordObject(setup, "Unsave piercing position");
+
+            // プレビューをクリーンアップ
+            int id = setup.GetInstanceID();
+            if (s_previews.TryGetValue(id, out var state))
+            {
+                CleanupPreviewState(setup, state);
+                s_previews.Remove(id);
+                s_originalMeshes.Remove(id);
+            }
+
+            setup.isPositionSaved = false;
+            setup.savedBlendShapeWeights = null;
+            setup.originalMesh = null;
+            EditorUtility.SetDirty(setup);
+
+            Debug.Log("[PiercingTool] 位置保存を解除しました。");
+        }
+
         private void SavePosition(PiercingSetup setup)
         {
             if (setup.targetRenderer == null)
@@ -324,6 +473,11 @@ namespace PiercingTool.Editor
             setup.savedBlendShapeWeights = new float[count];
             for (int i = 0; i < count; i++)
                 setup.savedBlendShapeWeights[i] = smr.GetBlendShapeWeight(i);
+
+            // プレビュー適用前の元メッシュを保持（ドメインリロード後の復元用）
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null)
+                setup.originalMesh = mf.sharedMesh;
 
             setup.isPositionSaved = true;
             EditorUtility.SetDirty(setup);
@@ -359,14 +513,10 @@ namespace PiercingTool.Editor
                 {
                     DrawVertexGroup(setup.referenceVertices, worldVertices, sceneView);
                 }
-                else
+                else if (_autoDetectedVertices != null)
                 {
-                    // 自動選択のプレビュー
-                    var triangles = setup.targetRenderer.sharedMesh.triangles;
-                    var autoIndices = FindClosestTriangle(
-                        worldVertices, triangles, setup.transform.position);
                     DrawVertexGroup(
-                        new List<int>(autoIndices), worldVertices, sceneView,
+                        new List<int>(_autoDetectedVertices), worldVertices, sceneView,
                         ColorAutoSelect, "auto");
                 }
             }
@@ -592,6 +742,13 @@ namespace PiercingTool.Editor
 
         private static void StaticUpdatePreviews()
         {
+            // ドメインリロード後の初回: isPositionSaved な Setup を自動再登録
+            if (s_needsRestore)
+            {
+                s_needsRestore = false;
+                RestorePreviewsAfterReload();
+            }
+
             if (s_previews.Count == 0) return;
 
             var toRemove = new List<int>();
