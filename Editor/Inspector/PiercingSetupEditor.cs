@@ -523,6 +523,12 @@ namespace PiercingTool.Editor
                     var mf = setup.GetComponent<MeshFilter>();
                     if (mf != null && mf.sharedMesh != null)
                         sourceVerts = mf.sharedMesh.vertices;
+                    else
+                    {
+                        var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                        if (smr != null && smr.sharedMesh != null)
+                            sourceVerts = smr.sharedMesh.vertices;
+                    }
                 }
                 else if (renderer != null && renderer.sharedMesh != null)
                 {
@@ -605,7 +611,18 @@ namespace PiercingTool.Editor
 
             if (usePiercingMesh)
             {
-                _pickerTool.meshFilter = setup.GetComponent<MeshFilter>();
+                // ピアスメッシュ: MeshFilter を優先、なければ SkinnedMeshRenderer
+                var mf = setup.GetComponent<MeshFilter>();
+                if (mf != null)
+                {
+                    _pickerTool.meshFilter = mf;
+                }
+                else
+                {
+                    var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                    if (smr != null)
+                        _pickerTool.targetRenderer = smr;
+                }
             }
             else
             {
