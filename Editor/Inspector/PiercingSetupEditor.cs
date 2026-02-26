@@ -742,6 +742,7 @@ namespace PiercingTool.Editor
 
             setup.isPositionSaved = false;
             setup.savedBlendShapeWeights = null;
+            setup.savedPiercingBlendShapeWeights = null;
             setup.originalMesh = null;
             EditorUtility.SetDirty(setup);
 
@@ -765,12 +766,27 @@ namespace PiercingTool.Editor
                 Debug.Log($"[PiercingTool] 参照頂点を自動選択しました: {string.Join(", ", autoSelected)}");
             }
 
-            // BlendShape weightsスナップショットを保存
+            // ターゲットの BlendShape weightsスナップショットを保存
             var smr = setup.targetRenderer;
             int count = smr.sharedMesh != null ? smr.sharedMesh.blendShapeCount : 0;
             setup.savedBlendShapeWeights = new float[count];
             for (int i = 0; i < count; i++)
                 setup.savedBlendShapeWeights[i] = smr.GetBlendShapeWeight(i);
+
+            // ピアス側の BlendShape weights を保存（SMR の場合のみ）
+            var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (piercingSmr != null && piercingSmr.sharedMesh != null &&
+                piercingSmr.sharedMesh.blendShapeCount > 0)
+            {
+                int pCount = piercingSmr.sharedMesh.blendShapeCount;
+                setup.savedPiercingBlendShapeWeights = new float[pCount];
+                for (int i = 0; i < pCount; i++)
+                    setup.savedPiercingBlendShapeWeights[i] = piercingSmr.GetBlendShapeWeight(i);
+            }
+            else
+            {
+                setup.savedPiercingBlendShapeWeights = null;
+            }
 
             // プレビュー適用前の元メッシュを保持（ドメインリロード後の復元用）
             var mf = setup.GetComponent<MeshFilter>();

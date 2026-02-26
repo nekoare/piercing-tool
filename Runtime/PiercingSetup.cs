@@ -33,6 +33,13 @@ namespace PiercingTool
         [HideInInspector]
         public float[] savedBlendShapeWeights;
 
+        /// <summary>
+        /// 「位置を保存」時のピアス側 SkinnedMeshRenderer の BlendShape weights。
+        /// ビルド時にこの状態をベイクしてピアスメッシュとして使用する。
+        /// </summary>
+        [HideInInspector]
+        public float[] savedPiercingBlendShapeWeights;
+
         [HideInInspector]
         public bool isPositionSaved;
 

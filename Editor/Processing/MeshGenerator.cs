@@ -21,15 +21,22 @@ namespace PiercingTool.Editor
             if (sourceMesh == null)
                 throw new System.InvalidOperationException("対象RendererにMeshが設定されていません。");
 
-            // ピアスメッシュを取得
+            // ピアスメッシュを取得・複製
             Mesh originalPiercingMesh = GetPiercingMesh(setup);
             if (originalPiercingMesh == null)
                 throw new System.InvalidOperationException(
                     "PiercingSetupと同じGameObjectにSkinnedMeshRendererまたはMeshFilterが必要です。");
 
-            // メッシュを複製
             var piercingMesh = Object.Instantiate(originalPiercingMesh);
             piercingMesh.name = originalPiercingMesh.name + "_Piercing";
+
+            // ピアス側に保存済みBlendShapeがある場合、weightsを頂点に適用してBlendShapeをクリア
+            if (setup.savedPiercingBlendShapeWeights != null &&
+                setup.savedPiercingBlendShapeWeights.Length > 0 &&
+                originalPiercingMesh.blendShapeCount > 0)
+            {
+                BakePiercingBlendShapes(piercingMesh, setup.savedPiercingBlendShapeWeights);
+            }
 
             // ソースメッシュ→ピアスメッシュの座標変換行列
             // 回転とスケールの違いを補正してBlendShapeデルタを正しく変換する
@@ -155,6 +162,46 @@ namespace PiercingTool.Editor
                 return smr.sharedMesh;
 
             return null;
+        }
+
+        /// <summary>
+        /// 保存済みBlendShape weightsをピアスメッシュの頂点に焼き込み、
+        /// BlendShapeデータをクリアする。BakeMeshと異なりボーン変形を含まない。
+        /// </summary>
+        private static void BakePiercingBlendShapes(Mesh piercingMesh, float[] savedWeights)
+        {
+            int blendShapeCount = piercingMesh.blendShapeCount;
+            if (blendShapeCount == 0) return;
+
+            var vertices = piercingMesh.vertices;
+            int vertexCount = vertices.Length;
+            var deltaVertices = new Vector3[vertexCount];
+            var deltaNormals = new Vector3[vertexCount];
+            var deltaTangents = new Vector3[vertexCount];
+
+            int applyCount = Mathf.Min(savedWeights.Length, blendShapeCount);
+            for (int si = 0; si < applyCount; si++)
+            {
+                float weight = savedWeights[si];
+                if (Mathf.Approximately(weight, 0f)) continue;
+
+                int frameCount = piercingMesh.GetBlendShapeFrameCount(si);
+                if (frameCount == 0) continue;
+
+                float frameWeight = piercingMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
+                if (Mathf.Approximately(frameWeight, 0f)) continue;
+
+                piercingMesh.GetBlendShapeFrameVertices(
+                    si, frameCount - 1, deltaVertices, deltaNormals, deltaTangents);
+
+                float ratio = weight / frameWeight;
+                for (int vi = 0; vi < vertexCount; vi++)
+                    vertices[vi] += deltaVertices[vi] * ratio;
+            }
+
+            piercingMesh.vertices = vertices;
+            piercingMesh.ClearBlendShapes();
+            piercingMesh.RecalculateBounds();
         }
 
         private static void TransferBoneWeights(
