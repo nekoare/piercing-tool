@@ -1324,7 +1324,8 @@ namespace PiercingTool.Editor
             // モード別の事前チェック
             if (setup.mode == PiercingMode.Single)
             {
-                if (setup.referenceVertices.Count == 0) return false;
+                if (setup.referenceVertices.Count == 0 && !setup.maintainOverallShape)
+                    return false;
             }
             else // Chain / MultiAnchor
             {
@@ -1449,7 +1450,17 @@ namespace PiercingTool.Editor
         private static void ApplyRigidPreview(PiercingSetup setup, Mesh sourceMesh, PreviewState state)
         {
             var renderer = setup.targetRenderer;
-            var refIndicesArr = setup.referenceVertices.ToArray();
+            int[] refIndicesArr;
+
+            if (setup.maintainOverallShape)
+            {
+                var piercingWorldPos = GetPiercingMeshWorldCenter(setup);
+                refIndicesArr = MeshGenerator.FindClosestTwoVertices(renderer, piercingWorldPos);
+            }
+            else
+            {
+                refIndicesArr = setup.referenceVertices.ToArray();
+            }
 
             // ソース→ピアス座標変換行列
             var sourceToPiercing = setup.transform.worldToLocalMatrix *
