@@ -57,12 +57,19 @@ namespace PiercingTool.Editor
             if (setup.mode == PiercingMode.Single)
             {
                 var refIndicesArr = setup.referenceVertices.ToArray();
+                var piercingWorldPos = GetPiercingMeshWorldCenter(setup);
 
-                // 参照頂点が未指定の場合、ピアス位置から最近傍三角面を自動選択
-                if (refIndicesArr.Length == 0)
+                if (setup.maintainOverallShape)
                 {
+                    // 「全体の形状を維持する」: 最寄り2頂点で軸回転のみ
+                    refIndicesArr = FindClosestTwoVertices(
+                        setup.targetRenderer, piercingWorldPos);
+                }
+                else if (refIndicesArr.Length == 0)
+                {
+                    // 参照頂点が未指定の場合、最近傍三角面を自動選択
                     refIndicesArr = FindClosestTriangleVertices(
-                        setup.targetRenderer, setup.transform.position);
+                        setup.targetRenderer, piercingWorldPos);
                 }
 
                 resolvedRefIndices = refIndicesArr;
@@ -412,6 +419,23 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// ピアスメッシュのバウンディングボックス中心をワールド座標で返す。
+        /// transform.position（原点）ではなく実際のメッシュ位置を返す。
+        /// </summary>
+        private static Vector3 GetPiercingMeshWorldCenter(PiercingSetup setup)
+        {
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+                return setup.transform.TransformPoint(mf.sharedMesh.bounds.center);
+
+            var smr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (smr != null && smr.sharedMesh != null)
+                return setup.transform.TransformPoint(smr.sharedMesh.bounds.center);
+
+            return setup.transform.position;
+        }
+
+        /// <summary>
         /// ピアスのワールド位置に最も近いソースメッシュ上の三角面の3頂点インデックスを返す。
         /// BakeMeshで現在のBlendShape/ボーン状態を反映した変形後メッシュから最近傍を検索する。
         /// </summary>
@@ -468,6 +492,42 @@ namespace PiercingTool.Editor
                 return new int[] { closestVertex };
 
             return new int[] { triangles[bestTriStart], triangles[bestTriStart + 1], triangles[bestTriStart + 2] };
+        }
+
+        /// <summary>
+        /// ターゲットメッシュ上でピアス位置に最も近い2頂点のインデックスを返す。
+        /// 「全体の形状を維持する」オプション用。
+        /// </summary>
+        public static int[] FindClosestTwoVertices(SkinnedMeshRenderer renderer, Vector3 piercingWorldPos)
+        {
+            var bakedMesh = new Mesh();
+            renderer.BakeMesh(bakedMesh);
+
+            var vertices = bakedMesh.vertices;
+            var localPos = renderer.transform.InverseTransformPoint(piercingWorldPos);
+
+            int closest0 = 0, closest1 = 1;
+            float dist0 = float.MaxValue, dist1 = float.MaxValue;
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                float distSq = (vertices[i] - localPos).sqrMagnitude;
+                if (distSq < dist0)
+                {
+                    closest1 = closest0;
+                    dist1 = dist0;
+                    closest0 = i;
+                    dist0 = distSq;
+                }
+                else if (distSq < dist1)
+                {
+                    closest1 = i;
+                    dist1 = distSq;
+                }
+            }
+
+            Object.DestroyImmediate(bakedMesh);
+            return new int[] { closest0, closest1 };
         }
 
         /// <summary>

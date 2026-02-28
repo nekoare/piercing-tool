@@ -63,5 +63,8 @@ namespace PiercingTool
 
         [Tooltip("ピアスの各頂点に最寄りの体メッシュ頂点のボーンウェイトを個別適用する")]
         public bool perVertexBoneWeights;
+
+        [Tooltip("最寄りの2頂点を参照点にして軸回転のみで追従し、ピアスの全体的な形状を維持する")]
+        public bool maintainOverallShape;
     }
 }

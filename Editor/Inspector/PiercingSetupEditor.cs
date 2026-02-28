@@ -14,6 +14,7 @@ namespace PiercingTool.Editor
         private SerializedProperty _targetRenderer;
         private SerializedProperty _skipBoneWeightTransfer;
         private SerializedProperty _perVertexBoneWeights;
+        private SerializedProperty _maintainOverallShape;
 
         private VertexPickerTool _pickerTool;
 
@@ -236,6 +237,7 @@ namespace PiercingTool.Editor
             _targetRenderer = serializedObject.FindProperty("targetRenderer");
             _skipBoneWeightTransfer = serializedObject.FindProperty("skipBoneWeightTransfer");
             _perVertexBoneWeights = serializedObject.FindProperty("perVertexBoneWeights");
+            _maintainOverallShape = serializedObject.FindProperty("maintainOverallShape");
             SceneView.duringSceneGui += DrawSceneVisualization;
         }
 
@@ -271,7 +273,7 @@ namespace PiercingTool.Editor
                 {
                     _autoDetectedVertices = FindClosestTriangle(
                         worldVerts, setup.targetRenderer.sharedMesh.triangles,
-                        setup.transform.position);
+                        GetPiercingMeshWorldCenter(setup));
                 }
             }
             else
@@ -288,6 +290,10 @@ namespace PiercingTool.Editor
                     new GUIContent("体表面に追従",
                         "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
                         "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
+                EditorGUILayout.PropertyField(_maintainOverallShape,
+                    new GUIContent("全体の形状を維持する",
+                        "ピアス位置に最も近い2頂点を自動選択し、軸方向の回転のみで追従します。\n" +
+                        "ピアスの形状変化を抑えたい場合に有効です。"));
             }
             else if (setup.mode == PiercingMode.Chain)
             {
@@ -455,7 +461,7 @@ namespace PiercingTool.Editor
                             {
                                 var auto = FindClosestTriangle(
                                     worldVerts, setup.targetRenderer.sharedMesh.triangles,
-                                    setup.transform.position);
+                                    GetPiercingMeshWorldCenter(setup));
                                 Undo.RecordObject(setup, "Re-detect vertices");
                                 vertices.Clear();
                                 vertices.AddRange(auto);
@@ -981,6 +987,23 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// ピアスメッシュのバウンディングボックス中心をワールド座標で返す。
+        /// transform.position（原点）ではなく実際のメッシュ位置を返す。
+        /// </summary>
+        private static Vector3 GetPiercingMeshWorldCenter(PiercingSetup setup)
+        {
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null && (mf.hideFlags & HideFlags.DontSave) == 0)
+                return setup.transform.TransformPoint(mf.sharedMesh.bounds.center);
+
+            var smr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (smr != null && smr.sharedMesh != null)
+                return setup.transform.TransformPoint(smr.sharedMesh.bounds.center);
+
+            return setup.transform.position;
+        }
+
+        /// <summary>
         /// ピアス側頂点のワールド重心を計算し、ターゲットメッシュ上の最近傍三角面を自動検出して
         /// 対応アンカーの targetVertices を上書きする。
         /// </summary>
@@ -1205,13 +1228,15 @@ namespace PiercingTool.Editor
 
             var state = new PreviewState();
 
-            // ピアス側 SMR の BlendShape weights を保存済み値に固定
+            // ピアス側 SMR の参照を常に保存（CleanupPreviewState での復元に必要）
             var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+            state.piercingSmr = piercingSmr;
+
+            // ピアス側 SMR の BlendShape weights を保存済み値に固定
             if (piercingSmr != null && piercingSmr.sharedMesh != null &&
                 piercingSmr.sharedMesh.blendShapeCount > 0)
             {
                 int count = piercingSmr.sharedMesh.blendShapeCount;
-                state.piercingSmr = piercingSmr;
                 state.originalPiercingWeights = new float[count];
                 for (int i = 0; i < count; i++)
                     state.originalPiercingWeights[i] = piercingSmr.GetBlendShapeWeight(i);
