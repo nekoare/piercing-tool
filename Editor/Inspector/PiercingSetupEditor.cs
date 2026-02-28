@@ -65,6 +65,10 @@ namespace PiercingTool.Editor
             public int[][] anchorIndices;
             public Vector3[] anchorCentroids;
             public (int segmentIndex, float localT)[] segmentData;
+
+            // ピアス側 SMR の BlendShape weights 復元用
+            public SkinnedMeshRenderer piercingSmr;
+            public float[] originalPiercingWeights;
         }
 
         private static readonly Dictionary<int, PreviewState> s_previews =
@@ -1160,7 +1164,34 @@ namespace PiercingTool.Editor
             if (s_previews.TryGetValue(id, out var oldState))
                 CleanupPreviewState(setup, oldState);
 
-            s_previews[id] = new PreviewState();
+            var state = new PreviewState();
+
+            // ピアス側 SMR の BlendShape weights を保存済み値に固定
+            var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (piercingSmr != null && piercingSmr.sharedMesh != null &&
+                piercingSmr.sharedMesh.blendShapeCount > 0)
+            {
+                int count = piercingSmr.sharedMesh.blendShapeCount;
+                state.piercingSmr = piercingSmr;
+                state.originalPiercingWeights = new float[count];
+                for (int i = 0; i < count; i++)
+                    state.originalPiercingWeights[i] = piercingSmr.GetBlendShapeWeight(i);
+
+                // 保存済み weights があればそれを適用、なければ 0（BASE ポーズ）
+                if (setup.savedPiercingBlendShapeWeights != null)
+                {
+                    int applyCount = Mathf.Min(setup.savedPiercingBlendShapeWeights.Length, count);
+                    for (int i = 0; i < applyCount; i++)
+                        piercingSmr.SetBlendShapeWeight(i, setup.savedPiercingBlendShapeWeights[i]);
+                }
+                else
+                {
+                    for (int i = 0; i < count; i++)
+                        piercingSmr.SetBlendShapeWeight(i, 0f);
+                }
+            }
+
+            s_previews[id] = state;
         }
 
         private static void StaticUpdatePreviews()
@@ -1208,6 +1239,18 @@ namespace PiercingTool.Editor
 
         private static bool UpdatePreviewForSetup(PiercingSetup setup, PreviewState state)
         {
+            // ピアス側 SMR の BlendShape weights を保存済み値に維持
+            if (state.piercingSmr != null && state.originalPiercingWeights != null &&
+                setup.savedPiercingBlendShapeWeights != null)
+            {
+                int count = Mathf.Min(
+                    setup.savedPiercingBlendShapeWeights.Length,
+                    state.piercingSmr.sharedMesh != null
+                        ? state.piercingSmr.sharedMesh.blendShapeCount : 0);
+                for (int i = 0; i < count; i++)
+                    state.piercingSmr.SetBlendShapeWeight(i, setup.savedPiercingBlendShapeWeights[i]);
+            }
+
             if (setup.targetRenderer == null) return false;
 
             var renderer = setup.targetRenderer;
@@ -1502,6 +1545,17 @@ namespace PiercingTool.Editor
                 if (state.meshFilter != null && state.originalSharedMesh != null)
                     state.meshFilter.sharedMesh = state.originalSharedMesh;
                 Object.DestroyImmediate(state.previewMesh);
+            }
+
+            // ピアス側 SMR の BlendShape weights を復元
+            if (state.piercingSmr != null && state.originalPiercingWeights != null)
+            {
+                int count = Mathf.Min(
+                    state.originalPiercingWeights.Length,
+                    state.piercingSmr.sharedMesh != null
+                        ? state.piercingSmr.sharedMesh.blendShapeCount : 0);
+                for (int i = 0; i < count; i++)
+                    state.piercingSmr.SetBlendShapeWeight(i, state.originalPiercingWeights[i]);
             }
         }
 
