@@ -113,8 +113,12 @@ namespace PiercingTool.Editor
 
             sync.Bindings.Clear(); // 再ビルド時の重複防止
 
+            var root = setup.transform.root;
+            var defaultRefPath = GetRelativePath(
+                setup.targetRenderer.transform, root);
+
 #if PIERCING_VRCSDK
-            var visemeNames = GetVisemeBlendShapeNames(setup.transform.root);
+            var visemeNames = GetVisemeBlendShapeNames(root);
 #else
             HashSet<string> visemeNames = null;
 #endif
@@ -127,19 +131,71 @@ namespace PiercingTool.Editor
                 if (visemeNames != null && visemeNames.Contains(shapeName))
                     continue;
 
+                // targetRenderer に MA BlendShapeSync がある場合、
+                // チェーンを辿って最終的なソースを直接参照する
+                var resolved = ResolveSyncChain(
+                    shapeName, setup.targetRenderer, root);
+
                 var binding = new nadena.dev.modular_avatar.core.BlendshapeBinding
                 {
                     ReferenceMesh = new nadena.dev.modular_avatar.core.AvatarObjectReference
                     {
-                        referencePath = GetRelativePath(
-                            setup.targetRenderer.transform,
-                            setup.transform.root)
+                        referencePath = resolved.refPath ?? defaultRefPath
                     },
-                    Blendshape = shapeName,
+                    Blendshape = resolved.shapeName,
                     LocalBlendshape = shapeName
                 };
                 sync.Bindings.Add(binding);
             }
+        }
+
+        /// <summary>
+        /// BlendShapeSync のチェーンを辿り、最終的なソースの renderer パスと BlendShape 名を返す。
+        /// 例: ピアス→服→体 のチェーンがある場合、体の renderer と BlendShape 名を返す。
+        /// </summary>
+        private (string refPath, string shapeName) ResolveSyncChain(
+            string localName, SkinnedMeshRenderer startRenderer, Transform root)
+        {
+            string currentName = localName;
+            var currentRenderer = startRenderer;
+            var visited = new HashSet<int>();
+
+            while (currentRenderer != null && visited.Add(currentRenderer.GetInstanceID()))
+            {
+                var existingSync = currentRenderer.GetComponent<
+                    nadena.dev.modular_avatar.core.ModularAvatarBlendshapeSync>();
+                if (existingSync == null || existingSync.Bindings.Count == 0)
+                    break;
+
+                // currentName に対応するバインディングを検索
+                nadena.dev.modular_avatar.core.BlendshapeBinding found = default;
+                bool hasMatch = false;
+                foreach (var b in existingSync.Bindings)
+                {
+                    string bLocal = string.IsNullOrEmpty(b.LocalBlendshape)
+                        ? b.Blendshape : b.LocalBlendshape;
+                    if (bLocal == currentName)
+                    {
+                        found = b;
+                        hasMatch = true;
+                        break;
+                    }
+                }
+                if (!hasMatch) break;
+
+                // ソース側へ移動
+                currentName = found.Blendshape;
+                var refPath = found.ReferenceMesh.referencePath;
+                var sourceTransform = root.Find(refPath);
+                if (sourceTransform == null) break;
+
+                var sourceRenderer = sourceTransform.GetComponent<SkinnedMeshRenderer>();
+                if (sourceRenderer == null) break;
+
+                currentRenderer = sourceRenderer;
+            }
+
+            return (GetRelativePath(currentRenderer.transform, root), currentName);
         }
 
         private string GetRelativePath(Transform target, Transform root)
