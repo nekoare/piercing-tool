@@ -14,6 +14,28 @@ namespace PiercingTool.Editor
 
             foreach (var setup in setups)
             {
+                // SMR プレビュー状態のクリーンアップ
+                if (setup.isSmrPreviewActive)
+                {
+                    var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                    if (piercingSmr != null)
+                        piercingSmr.enabled = true;
+
+                    // HideAndDontSave な一時 MeshFilter/MeshRenderer を削除
+                    foreach (var tempMf in setup.GetComponents<MeshFilter>())
+                    {
+                        if ((tempMf.hideFlags & HideFlags.DontSave) != 0)
+                            Object.DestroyImmediate(tempMf);
+                    }
+                    foreach (var tempMr in setup.GetComponents<MeshRenderer>())
+                    {
+                        if ((tempMr.hideFlags & HideFlags.DontSave) != 0)
+                            Object.DestroyImmediate(tempMr);
+                    }
+
+                    setup.isSmrPreviewActive = false;
+                }
+
                 // プレビューメッシュがクローンに残っている場合、元のメッシュに復元
                 var mf = setup.GetComponent<MeshFilter>();
                 if (mf != null && mf.sharedMesh != null)

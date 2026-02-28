@@ -49,6 +49,12 @@ namespace PiercingTool
         [HideInInspector]
         public Mesh originalMesh;
 
+        /// <summary>
+        /// SMR ピアスのプレビュー中に true。ドメインリロード後の復元に使用。
+        /// </summary>
+        [HideInInspector]
+        public bool isSmrPreviewActive;
+
         // --- Chain / MultiAnchor 共通 ---
         public List<AnchorPair> anchors = new List<AnchorPair>();
 

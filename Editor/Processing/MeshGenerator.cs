@@ -168,7 +168,7 @@ namespace PiercingTool.Editor
         /// 保存済みBlendShape weightsをピアスメッシュの頂点に焼き込み、
         /// BlendShapeデータをクリアする。BakeMeshと異なりボーン変形を含まない。
         /// </summary>
-        private static void BakePiercingBlendShapes(Mesh piercingMesh, float[] savedWeights)
+        internal static void BakePiercingBlendShapes(Mesh piercingMesh, float[] savedWeights)
         {
             int blendShapeCount = piercingMesh.blendShapeCount;
             if (blendShapeCount == 0) return;

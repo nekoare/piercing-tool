@@ -69,6 +69,10 @@ namespace PiercingTool.Editor
             // ピアス側 SMR の BlendShape weights 復元用
             public SkinnedMeshRenderer piercingSmr;
             public float[] originalPiercingWeights;
+
+            // SMR ピアスのプレビュー用
+            public bool isSmrPiercing;
+            public MeshRenderer tempMeshRenderer;
         }
 
         private static readonly Dictionary<int, PreviewState> s_previews =
@@ -103,18 +107,42 @@ namespace PiercingTool.Editor
             foreach (var setup in setups)
             {
                 int id = setup.GetInstanceID();
-                if (!setup.isPositionSaved) continue;
+
+                // isPositionSaved が Undo で false に戻った場合、
+                // SMR プレビュー状態が残っていたらクリーンアップ
+                if (!setup.isPositionSaved)
+                {
+                    if (setup.isSmrPreviewActive)
+                    {
+                        var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                        if (smr != null) smr.enabled = true;
+                        CleanupOrphanedTempComponents(setup);
+                        setup.isSmrPreviewActive = false;
+                        EditorUtility.SetDirty(setup);
+                    }
+                    continue;
+                }
 
                 // 既にプレビュー管理中なら何もしない
                 if (s_previews.ContainsKey(id)) continue;
 
-                // MeshFilterがMissingまたはプレビューメッシュの場合、元メッシュを復元
                 var mf = setup.GetComponent<MeshFilter>();
-                if (mf != null &&
-                    s_originalMeshes.TryGetValue(id, out var originalMesh) && originalMesh != null &&
-                    mf.sharedMesh != originalMesh)
+                if (mf != null && (mf.hideFlags & HideFlags.DontSave) == 0)
                 {
-                    mf.sharedMesh = originalMesh;
+                    // MF ベース: 元メッシュを復元
+                    if (s_originalMeshes.TryGetValue(id, out var originalMesh) &&
+                        originalMesh != null && mf.sharedMesh != originalMesh)
+                    {
+                        mf.sharedMesh = originalMesh;
+                    }
+                }
+                else
+                {
+                    // SMR ベース: SMR を再有効化してから再登録
+                    var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                    if (piercingSmr != null)
+                        piercingSmr.enabled = true;
+                    CleanupOrphanedTempComponents(setup);
                 }
 
                 RegisterPreview(setup);
@@ -136,14 +164,24 @@ namespace PiercingTool.Editor
                 if (!setup.isPositionSaved) continue;
                 if (s_previews.ContainsKey(setup.GetInstanceID())) continue;
 
-                // ドメインリロードで static 辞書が消えた後、MeshFilter が
-                // 古いプレビューメッシュ(HideAndDontSave)を指している場合がある。
-                // シリアライズ済みの originalMesh から元メッシュを復元する。
-                var mf = setup.GetComponent<MeshFilter>();
-                if (mf != null && setup.originalMesh != null &&
-                    mf.sharedMesh != setup.originalMesh)
+                if (setup.isSmrPreviewActive)
                 {
-                    mf.sharedMesh = setup.originalMesh;
+                    // SMR ピアス: リロードで HideAndDontSave な MF/MR は消えている。
+                    // SMR を再有効化してから再登録（UpdatePreview で再作成される）
+                    var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                    if (piercingSmr != null)
+                        piercingSmr.enabled = true;
+                    CleanupOrphanedTempComponents(setup);
+                }
+                else
+                {
+                    // MF ベース: シリアライズ済みの originalMesh から復元
+                    var mf = setup.GetComponent<MeshFilter>();
+                    if (mf != null && setup.originalMesh != null &&
+                        mf.sharedMesh != setup.originalMesh)
+                    {
+                        mf.sharedMesh = setup.originalMesh;
+                    }
                 }
 
                 RegisterPreview(setup);
@@ -747,6 +785,7 @@ namespace PiercingTool.Editor
             setup.isPositionSaved = false;
             setup.savedBlendShapeWeights = null;
             setup.savedPiercingBlendShapeWeights = null;
+            setup.isSmrPreviewActive = false;
             setup.originalMesh = null;
             EditorUtility.SetDirty(setup);
 
@@ -1289,20 +1328,10 @@ namespace PiercingTool.Editor
             if (!weightsChanged) return false;
 
             // プレビューメッシュの初期化
-            var mf = setup.GetComponent<MeshFilter>();
-            if (mf == null) return false;
-
             if (state.previewMesh == null)
             {
-                state.originalSharedMesh = mf.sharedMesh;
-                if (state.originalSharedMesh == null) return false;
-                s_originalMeshes[setup.GetInstanceID()] = state.originalSharedMesh;
-                state.meshFilter = mf;
-                state.previewMesh = Object.Instantiate(state.originalSharedMesh);
-                state.previewMesh.name = state.originalSharedMesh.name + "_Preview";
-                state.previewMesh.hideFlags = HideFlags.HideAndDontSave;
-                state.originalVertices = state.previewMesh.vertices;
-                mf.sharedMesh = state.previewMesh;
+                if (!InitializePreviewMesh(setup, state))
+                    return false;
 
                 // Chain/MultiAnchor: セグメントデータを初期化（1回のみ）
                 if (setup.mode != PiercingMode.Single)
@@ -1316,6 +1345,78 @@ namespace PiercingTool.Editor
                 ApplyRigidPreview(setup, sourceMesh, state);
             else
                 ApplySegmentPreview(setup, sourceMesh, state);
+
+            return true;
+        }
+
+        /// <summary>
+        /// プレビューメッシュを初期化する。MF ピアスは既存メッシュを複製、
+        /// SMR ピアスは SMR を無効化して一時 MF+MR を追加する。
+        /// </summary>
+        private static bool InitializePreviewMesh(PiercingSetup setup, PreviewState state)
+        {
+            var mf = setup.GetComponent<MeshFilter>();
+            var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+
+            if (mf != null && (mf.hideFlags & HideFlags.DontSave) == 0)
+            {
+                // === MF ベース（既存フロー） ===
+                state.originalSharedMesh = mf.sharedMesh;
+                if (state.originalSharedMesh == null) return false;
+                s_originalMeshes[setup.GetInstanceID()] = state.originalSharedMesh;
+                state.meshFilter = mf;
+                state.previewMesh = Object.Instantiate(state.originalSharedMesh);
+                state.previewMesh.name = state.originalSharedMesh.name + "_Preview";
+                state.previewMesh.hideFlags = HideFlags.HideAndDontSave;
+                state.originalVertices = state.previewMesh.vertices;
+                mf.sharedMesh = state.previewMesh;
+                state.isSmrPiercing = false;
+            }
+            else if (piercingSmr != null && piercingSmr.sharedMesh != null)
+            {
+                // === SMR ベース（新規フロー） ===
+                state.isSmrPiercing = true;
+
+                // SMR の sharedMesh を元にプレビューメッシュを作成
+                var sourceMesh = piercingSmr.sharedMesh;
+                state.originalSharedMesh = sourceMesh;
+                state.previewMesh = Object.Instantiate(sourceMesh);
+                state.previewMesh.name = sourceMesh.name + "_Preview";
+                state.previewMesh.hideFlags = HideFlags.HideAndDontSave;
+
+                // 保存済みピアス BlendShape を頂点にベイク
+                if (setup.savedPiercingBlendShapeWeights != null &&
+                    setup.savedPiercingBlendShapeWeights.Length > 0 &&
+                    state.previewMesh.blendShapeCount > 0)
+                {
+                    MeshGenerator.BakePiercingBlendShapes(
+                        state.previewMesh, setup.savedPiercingBlendShapeWeights);
+                }
+
+                state.originalVertices = state.previewMesh.vertices;
+
+                // SMR を無効化
+                piercingSmr.enabled = false;
+
+                // 一時的な MeshFilter + MeshRenderer を追加
+                var tempMf = setup.gameObject.AddComponent<MeshFilter>();
+                tempMf.hideFlags = HideFlags.HideAndDontSave;
+                tempMf.sharedMesh = state.previewMesh;
+
+                var tempMr = setup.gameObject.AddComponent<MeshRenderer>();
+                tempMr.hideFlags = HideFlags.HideAndDontSave;
+                tempMr.sharedMaterials = piercingSmr.sharedMaterials;
+
+                state.meshFilter = tempMf;
+                state.tempMeshRenderer = tempMr;
+
+                setup.isSmrPreviewActive = true;
+                EditorUtility.SetDirty(setup);
+            }
+            else
+            {
+                return false;
+            }
 
             return true;
         }
@@ -1541,9 +1642,28 @@ namespace PiercingTool.Editor
         {
             if (state.previewMesh != null)
             {
-                // コンポーネント削除時でも meshFilter 経由で復元できる
-                if (state.meshFilter != null && state.originalSharedMesh != null)
-                    state.meshFilter.sharedMesh = state.originalSharedMesh;
+                if (state.isSmrPiercing)
+                {
+                    // SMR ピアス: 一時コンポーネントを破棄し、SMR を再有効化
+                    if (state.meshFilter != null)
+                        Object.DestroyImmediate(state.meshFilter);
+                    if (state.tempMeshRenderer != null)
+                        Object.DestroyImmediate(state.tempMeshRenderer);
+                    if (state.piercingSmr != null)
+                        state.piercingSmr.enabled = true;
+                    if (setup != null)
+                    {
+                        setup.isSmrPreviewActive = false;
+                        EditorUtility.SetDirty(setup);
+                    }
+                }
+                else
+                {
+                    // MF ベース: 元メッシュを復元
+                    if (state.meshFilter != null && state.originalSharedMesh != null)
+                        state.meshFilter.sharedMesh = state.originalSharedMesh;
+                }
+
                 Object.DestroyImmediate(state.previewMesh);
             }
 
@@ -1560,6 +1680,24 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// HideAndDontSave な孤立 MeshFilter/MeshRenderer を削除する。
+        /// ドメインリロードや Undo で PreviewState が失われた場合のクリーンアップ用。
+        /// </summary>
+        private static void CleanupOrphanedTempComponents(PiercingSetup setup)
+        {
+            foreach (var mf in setup.GetComponents<MeshFilter>())
+            {
+                if ((mf.hideFlags & HideFlags.DontSave) != 0)
+                    Object.DestroyImmediate(mf);
+            }
+            foreach (var mr in setup.GetComponents<MeshRenderer>())
+            {
+                if ((mr.hideFlags & HideFlags.DontSave) != 0)
+                    Object.DestroyImmediate(mr);
+            }
+        }
+
+        /// <summary>
         /// シーン保存前に元のメッシュを復元（プレビューメッシュがシリアライズされるのを防ぐ）。
         /// </summary>
         private static void OnSceneSaving(UnityEngine.SceneManagement.Scene scene, string path)
@@ -1567,8 +1705,17 @@ namespace PiercingTool.Editor
             foreach (var kvp in s_previews)
             {
                 var state = kvp.Value;
-                if (state.meshFilter != null && state.originalSharedMesh != null)
-                    state.meshFilter.sharedMesh = state.originalSharedMesh;
+                if (state.isSmrPiercing)
+                {
+                    // SMR を一時的に再有効化（disabled 状態がシリアライズされるのを防ぐ）
+                    if (state.piercingSmr != null)
+                        state.piercingSmr.enabled = true;
+                }
+                else
+                {
+                    if (state.meshFilter != null && state.originalSharedMesh != null)
+                        state.meshFilter.sharedMesh = state.originalSharedMesh;
+                }
             }
         }
 
@@ -1580,8 +1727,17 @@ namespace PiercingTool.Editor
             foreach (var kvp in s_previews)
             {
                 var state = kvp.Value;
-                if (state.meshFilter != null && state.previewMesh != null)
-                    state.meshFilter.sharedMesh = state.previewMesh;
+                if (state.isSmrPiercing)
+                {
+                    // SMR を再無効化
+                    if (state.piercingSmr != null)
+                        state.piercingSmr.enabled = false;
+                }
+                else
+                {
+                    if (state.meshFilter != null && state.previewMesh != null)
+                        state.meshFilter.sharedMesh = state.previewMesh;
+                }
             }
         }
 
