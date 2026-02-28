@@ -286,14 +286,21 @@ namespace PiercingTool.Editor
             {
                 DrawVertexSection("参照頂点", setup.referenceVertices, PickerTarget.Single, setup);
                 EditorGUILayout.Space();
+                EditorGUI.BeginChangeCheck();
                 EditorGUILayout.PropertyField(_perVertexBoneWeights,
                     new GUIContent("体表面に追従",
                         "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
                         "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
+                if (EditorGUI.EndChangeCheck() && _perVertexBoneWeights.boolValue)
+                    _maintainOverallShape.boolValue = false;
+
+                EditorGUI.BeginChangeCheck();
                 EditorGUILayout.PropertyField(_maintainOverallShape,
                     new GUIContent("全体の形状を維持する",
                         "ピアス位置に最も近い2頂点を自動選択し、軸方向の回転のみで追従します。\n" +
                         "ピアスの形状変化を抑えたい場合に有効です。"));
+                if (EditorGUI.EndChangeCheck() && _maintainOverallShape.boolValue)
+                    _perVertexBoneWeights.boolValue = false;
             }
             else if (setup.mode == PiercingMode.Chain)
             {
