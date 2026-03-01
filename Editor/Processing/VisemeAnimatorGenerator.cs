@@ -146,16 +146,7 @@ namespace PiercingTool.Editor
         }
 
         private static string GetRelativePath(Transform target, Transform root)
-        {
-            var parts = new List<string>();
-            var current = target;
-            while (current != null && current != root)
-            {
-                parts.Insert(0, current.name);
-                current = current.parent;
-            }
-            return string.Join("/", parts);
-        }
+            => PiercingUtility.GetRelativePath(target, root);
     }
 }
 #endif

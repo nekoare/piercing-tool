@@ -38,8 +38,7 @@ namespace PiercingTool.Editor
         private GameObject _colliderGO;
         private MeshCollider _meshCollider;
         private Mesh _colliderMesh;
-        private bool[] _occlusionMask;
-        private bool _occlusionDirty = true;
+        private bool _pickDirty = true;
 
         // 表示用
         private Material _dotMaterial;
@@ -112,7 +111,7 @@ namespace PiercingTool.Editor
             _meshCollider.cookingOptions = MeshColliderCookingOptions.None;
             _meshCollider.sharedMesh = _colliderMesh;
 
-            _occlusionDirty = true;
+            _pickDirty = true;
         }
 
         private void CleanupCollider()
@@ -128,7 +127,7 @@ namespace PiercingTool.Editor
                 UnityEngine.Object.DestroyImmediate(_colliderMesh);
                 _colliderMesh = null;
             }
-            _occlusionMask = null;
+            _pickDirty = true;
         }
 
         private void UpdateCachedVertices()
@@ -175,48 +174,23 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
-        /// カメラから頂点へのレイがメッシュに遮られるかを判定し、
-        /// 各頂点のオクルージョンマスクを更新する。
+        /// 指定頂点がカメラから見て遮蔽されているかを判定する。
         /// </summary>
-        private void UpdateOcclusionMask(Camera camera)
+        private bool IsVertexOccluded(int vertexIndex)
         {
-            if (!_occlusionDirty || _meshCollider == null) return;
+            if (_meshCollider == null) return false;
 
-            int n = _cachedWorldVertices.Length;
-            if (_occlusionMask == null || _occlusionMask.Length != n)
-                _occlusionMask = new bool[n];
+            var wp = _cachedWorldVertices[vertexIndex];
+            var sp = HandleUtility.WorldToGUIPoint(wp);
+            var ray = HandleUtility.GUIPointToWorldRay(sp);
 
-            bool prevHitBackfaces = Physics.queriesHitBackfaces;
-            Physics.queriesHitBackfaces = true;
-            try
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    var wp = _cachedWorldVertices[i];
-                    var sp = HandleUtility.WorldToGUIPoint(wp);
-                    var ray = HandleUtility.GUIPointToWorldRay(sp);
+            float t = Vector3.Dot(wp - ray.origin, ray.direction);
+            if (t <= 0f) return false;
 
-                    // レイ上での頂点までの距離
-                    float t = Vector3.Dot(wp - ray.origin, ray.direction);
-                    if (t <= 0f)
-                    {
-                        _occlusionMask[i] = false;
-                        continue;
-                    }
+            float eps = Mathf.Max(HandleUtility.GetHandleSize(wp) * 0.005f, 0.0005f);
+            float maxDist = Mathf.Max(0f, t - eps);
 
-                    // 頂点自身のトライアングルに当たらないようにε分手前まで判定
-                    float eps = Mathf.Max(HandleUtility.GetHandleSize(wp) * 0.005f, 0.0005f);
-                    float maxDist = Mathf.Max(0f, t - eps);
-
-                    _occlusionMask[i] = _meshCollider.Raycast(ray, out _, maxDist);
-                }
-            }
-            finally
-            {
-                Physics.queriesHitBackfaces = prevHitBackfaces;
-            }
-
-            _occlusionDirty = false;
+            return _meshCollider.Raycast(ray, out _, maxDist);
         }
 
         private void OnSceneGUI(SceneView sceneView)
@@ -230,7 +204,7 @@ namespace PiercingTool.Editor
             if (e.type == EventType.MouseMove || e.type == EventType.MouseDrag)
             {
                 _lastMousePosition = e.mousePosition;
-                _occlusionDirty = true;
+                _pickDirty = true;
                 sceneView.Repaint();
             }
 
@@ -267,11 +241,12 @@ namespace PiercingTool.Editor
             {
                 EnsureMaterials();
 
-                // オクルージョン判定を更新
-                UpdateOcclusionMask(sceneView.camera);
-
-                // スクリーン距離でホバー頂点を判定
-                _hoveredVertex = PickNearestVertex(sceneView.camera);
+                // マウス近傍の頂点のみ遮蔽判定してホバー頂点を決定
+                if (_pickDirty)
+                {
+                    _hoveredVertex = PickNearestVertex(sceneView.camera);
+                    _pickDirty = false;
+                }
 
                 // 表示用ドット描画（シーンRTに直接、ZTest付き）
                 DrawVertexDots(sceneView.camera);
@@ -302,23 +277,33 @@ namespace PiercingTool.Editor
         /// </summary>
         private int PickNearestVertex(Camera camera)
         {
+            // Phase 1: スクリーン距離でマウス近傍の候補を収集
             float bestDist = PickDistanceSqr;
             int bestIndex = -1;
 
-            for (int i = 0; i < _cachedWorldVertices.Length; i++)
+            bool prevHitBackfaces = Physics.queriesHitBackfaces;
+            if (_meshCollider != null)
+                Physics.queriesHitBackfaces = true;
+
+            try
             {
-                // オクルージョンされた頂点はスキップ
-                if (_occlusionMask != null && i < _occlusionMask.Length && _occlusionMask[i])
-                    continue;
-
-                Vector2 sp = HandleUtility.WorldToGUIPoint(_cachedWorldVertices[i]);
-                float dist = (sp - _lastMousePosition).sqrMagnitude;
-
-                if (dist < bestDist)
+                for (int i = 0; i < _cachedWorldVertices.Length; i++)
                 {
+                    Vector2 sp = HandleUtility.WorldToGUIPoint(_cachedWorldVertices[i]);
+                    float dist = (sp - _lastMousePosition).sqrMagnitude;
+                    if (dist >= bestDist) continue;
+
+                    // Phase 2: 候補のみ遮蔽判定（マウスから遠い頂点は Raycast しない）
+                    if (IsVertexOccluded(i)) continue;
+
                     bestDist = dist;
                     bestIndex = i;
                 }
+            }
+            finally
+            {
+                if (_meshCollider != null)
+                    Physics.queriesHitBackfaces = prevHitBackfaces;
             }
 
             return bestIndex;

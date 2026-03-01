@@ -449,55 +449,12 @@ namespace PiercingTool.Editor
         {
             var bakedMesh = new Mesh();
             renderer.BakeMesh(bakedMesh);
-
             var vertices = bakedMesh.vertices;
             var triangles = bakedMesh.triangles;
-
-            // ピアスのワールド位置をBakeMeshの座標系（レンダラーのローカル空間）に変換
-            var localPos = renderer.transform.InverseTransformPoint(piercingWorldPos);
-
-            // 最も近い頂点を見つける
-            float minDistSq = float.MaxValue;
-            int closestVertex = 0;
-            for (int i = 0; i < vertices.Length; i++)
-            {
-                float distSq = (vertices[i] - localPos).sqrMagnitude;
-                if (distSq < minDistSq)
-                {
-                    minDistSq = distSq;
-                    closestVertex = i;
-                }
-            }
-
-            // closestVertexを共有する三角面から、法線がピアス方向を向いている最良の面を選ぶ
-            float bestScore = float.NegativeInfinity;
-            int bestTriStart = -1;
-
-            for (int i = 0; i < triangles.Length; i += 3)
-            {
-                int i0 = triangles[i], i1 = triangles[i + 1], i2 = triangles[i + 2];
-                if (i0 != closestVertex && i1 != closestVertex && i2 != closestVertex)
-                    continue;
-
-                Vector3 v0 = vertices[i0], v1 = vertices[i1], v2 = vertices[i2];
-                Vector3 normal = Vector3.Cross(v1 - v0, v2 - v0).normalized;
-                Vector3 centroid = (v0 + v1 + v2) / 3f;
-                Vector3 toTarget = (localPos - centroid).normalized;
-                float score = Vector3.Dot(normal, toTarget);
-
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestTriStart = i;
-                }
-            }
-
             Object.DestroyImmediate(bakedMesh);
 
-            if (bestTriStart < 0)
-                return new int[] { closestVertex };
-
-            return new int[] { triangles[bestTriStart], triangles[bestTriStart + 1], triangles[bestTriStart + 2] };
+            var localPos = renderer.transform.InverseTransformPoint(piercingWorldPos);
+            return PiercingUtility.FindClosestTriangleIndices(vertices, triangles, localPos);
         }
 
         /// <summary>
