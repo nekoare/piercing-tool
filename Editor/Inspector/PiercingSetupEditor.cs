@@ -79,6 +79,11 @@ namespace PiercingTool.Editor
         private static readonly Dictionary<int, PreviewState> s_previews =
             new Dictionary<int, PreviewState>();
 
+        // BakeWorldVertices キャッシュ（同一フレーム内の重複BakeMeshを防止）
+        private static int s_bakeCache_rendererId;
+        private static int s_bakeCache_frame = -1;
+        private static Vector3[] s_bakeCache_result;
+
         // Undo復元用: クリーンアップ後も元メッシュ参照を保持
         private static readonly Dictionary<int, Mesh> s_originalMeshes =
             new Dictionary<int, Mesh>();
@@ -206,12 +211,13 @@ namespace PiercingTool.Editor
         /// </summary>
         public static void CleanupAllPreviews()
         {
-            foreach (var kvp in s_previews)
+            var snapshot = new List<KeyValuePair<int, PreviewState>>(s_previews);
+            s_previews.Clear();
+            foreach (var kvp in snapshot)
             {
                 var setup = EditorUtility.InstanceIDToObject(kvp.Key) as PiercingSetup;
                 CleanupPreviewState(setup, kvp.Value);
             }
-            s_previews.Clear();
         }
 
         /// <summary>
@@ -814,12 +820,24 @@ namespace PiercingTool.Editor
 
             // 参照頂点が未指定の場合、現在のBlendShape状態で自動選択して保存
             // （ビルド時のBlendShape状態に依存しないようにするため）
-            if (setup.mode == PiercingMode.Single && setup.referenceVertices.Count == 0)
+            if (setup.mode == PiercingMode.Single)
             {
-                var autoSelected = MeshGenerator.FindClosestTriangleVertices(
-                    setup.targetRenderer, GetPiercingMeshWorldCenter(setup));
-                setup.referenceVertices.AddRange(autoSelected);
-                Debug.Log($"[PiercingTool] 参照頂点を自動選択しました: {string.Join(", ", autoSelected)}");
+                if (setup.maintainOverallShape)
+                {
+                    // 「全体の形状を維持する」: 2頂点を自動選択して保存
+                    setup.referenceVertices.Clear();
+                    var autoSelected = MeshGenerator.FindClosestTwoVertices(
+                        setup.targetRenderer, GetPiercingMeshWorldCenter(setup));
+                    setup.referenceVertices.AddRange(autoSelected);
+                    Debug.Log($"[PiercingTool] 2頂点を自動選択しました（形状維持）: {string.Join(", ", autoSelected)}");
+                }
+                else if (setup.referenceVertices.Count == 0)
+                {
+                    var autoSelected = MeshGenerator.FindClosestTriangleVertices(
+                        setup.targetRenderer, GetPiercingMeshWorldCenter(setup));
+                    setup.referenceVertices.AddRange(autoSelected);
+                    Debug.Log($"[PiercingTool] 参照頂点を自動選択しました: {string.Join(", ", autoSelected)}");
+                }
             }
 
             // ターゲットの BlendShape weightsスナップショットを保存
@@ -935,6 +953,12 @@ namespace PiercingTool.Editor
         {
             if (renderer == null || renderer.sharedMesh == null) return null;
 
+            int id = renderer.GetInstanceID();
+            int frame = UnityEngine.Time.frameCount;
+            if (frame == s_bakeCache_frame && id == s_bakeCache_rendererId
+                && s_bakeCache_result != null)
+                return s_bakeCache_result;
+
             var bakedMesh = new Mesh();
             renderer.BakeMesh(bakedMesh);
             var localVerts = bakedMesh.vertices;
@@ -943,6 +967,10 @@ namespace PiercingTool.Editor
             for (int i = 0; i < localVerts.Length; i++)
                 worldVerts[i] = transform.TransformPoint(localVerts[i]);
             Object.DestroyImmediate(bakedMesh);
+
+            s_bakeCache_rendererId = id;
+            s_bakeCache_frame = frame;
+            s_bakeCache_result = worldVerts;
             return worldVerts;
         }
 
@@ -1459,13 +1487,15 @@ namespace PiercingTool.Editor
             var renderer = setup.targetRenderer;
             int[] refIndicesArr;
 
-            if (setup.maintainOverallShape)
+            if (setup.maintainOverallShape && setup.referenceVertices.Count == 0)
             {
+                // 保存前: 毎フレーム自動選択
                 var piercingWorldPos = GetPiercingMeshWorldCenter(setup);
                 refIndicesArr = MeshGenerator.FindClosestTwoVertices(renderer, piercingWorldPos);
             }
             else
             {
+                // 保存後は referenceVertices を使用（maintainOverallShape の2頂点も含む）
                 refIndicesArr = setup.referenceVertices.ToArray();
             }
 
@@ -1745,19 +1775,26 @@ namespace PiercingTool.Editor
         /// </summary>
         private static void OnSceneSaving(UnityEngine.SceneManagement.Scene scene, string path)
         {
-            foreach (var kvp in s_previews)
+            // Values のスナップショットを取って走査（コールバック中の変更に対する安全策）
+            var states = new List<PreviewState>(s_previews.Values);
+            foreach (var state in states)
             {
-                var state = kvp.Value;
-                if (state.isSmrPiercing)
+                try
                 {
-                    // SMR を一時的に再有効化（disabled 状態がシリアライズされるのを防ぐ）
-                    if (state.piercingSmr != null)
-                        state.piercingSmr.enabled = true;
+                    if (state.isSmrPiercing)
+                    {
+                        if (state.piercingSmr != null)
+                            state.piercingSmr.enabled = true;
+                    }
+                    else
+                    {
+                        if (state.meshFilter != null && state.originalSharedMesh != null)
+                            state.meshFilter.sharedMesh = state.originalSharedMesh;
+                    }
                 }
-                else
+                catch (System.Exception e)
                 {
-                    if (state.meshFilter != null && state.originalSharedMesh != null)
-                        state.meshFilter.sharedMesh = state.originalSharedMesh;
+                    Debug.LogWarning($"[PiercingTool] シーン保存前のプレビュー復元に失敗: {e.Message}");
                 }
             }
         }
@@ -1767,19 +1804,25 @@ namespace PiercingTool.Editor
         /// </summary>
         private static void OnSceneSaved(UnityEngine.SceneManagement.Scene scene)
         {
-            foreach (var kvp in s_previews)
+            var states = new List<PreviewState>(s_previews.Values);
+            foreach (var state in states)
             {
-                var state = kvp.Value;
-                if (state.isSmrPiercing)
+                try
                 {
-                    // SMR を再無効化
-                    if (state.piercingSmr != null)
-                        state.piercingSmr.enabled = false;
+                    if (state.isSmrPiercing)
+                    {
+                        if (state.piercingSmr != null)
+                            state.piercingSmr.enabled = false;
+                    }
+                    else
+                    {
+                        if (state.meshFilter != null && state.previewMesh != null)
+                            state.meshFilter.sharedMesh = state.previewMesh;
+                    }
                 }
-                else
+                catch (System.Exception e)
                 {
-                    if (state.meshFilter != null && state.previewMesh != null)
-                        state.meshFilter.sharedMesh = state.previewMesh;
+                    Debug.LogWarning($"[PiercingTool] シーン保存後のプレビュー復帰に失敗: {e.Message}");
                 }
             }
         }

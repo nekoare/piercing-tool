@@ -54,14 +54,17 @@ namespace PiercingTool.Editor
             // BlendShape転写
             List<string> transferred;
             int[] resolvedRefIndices = null; // 自動選択を含む解決済み参照頂点（ボーンウェイト用）
+            int[][] anchorIndices = null;
+            Vector3[] anchorCentroids = null;
+            bool isChainOrMulti = setup.mode != PiercingMode.Single;
             if (setup.mode == PiercingMode.Single)
             {
                 var refIndicesArr = setup.referenceVertices.ToArray();
                 var piercingWorldPos = GetPiercingMeshWorldCenter(setup);
 
-                if (setup.maintainOverallShape)
+                if (setup.maintainOverallShape && refIndicesArr.Length == 0)
                 {
-                    // 「全体の形状を維持する」: 最寄り2頂点で軸回転のみ
+                    // 「全体の形状を維持する」（参照頂点未保存時のフォールバック）
                     refIndicesArr = FindClosestTwoVertices(
                         setup.targetRenderer, piercingWorldPos);
                 }
@@ -86,12 +89,12 @@ namespace PiercingTool.Editor
             }
             else // Chain / MultiAnchor
             {
-                var anchorIndices = ResolveAnchorIndices(setup);
+                anchorIndices = ResolveAnchorIndices(setup);
                 if (anchorIndices.Length < 2)
                     throw new System.InvalidOperationException(
                         "Chain/MultiAnchor モードには2つ以上のアンカーが必要です。");
 
-                var anchorCentroids = ComputeAnchorCentroids(
+                anchorCentroids = ComputeAnchorCentroids(
                     setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 
                 // BASE 補正（全アンカーの target 頂点を統合して重心オフセット計算）
@@ -122,7 +125,9 @@ namespace PiercingTool.Editor
             if (!setup.skipBoneWeightTransfer)
             {
                 TransferBoneWeights(setup, sourceMesh, piercingMesh,
-                    resolvedRefIndices, sourceToPiercing);
+                    resolvedRefIndices, sourceToPiercing,
+                    isChainOrMulti ? anchorIndices : null,
+                    isChainOrMulti ? anchorCentroids : null);
 
                 // ピアスメッシュの座標系に合ったbindposeを計算する
                 // bindpose[i] = bone[i].worldToLocal * mesh.localToWorld
@@ -213,7 +218,8 @@ namespace PiercingTool.Editor
 
         private static void TransferBoneWeights(
             PiercingSetup setup, Mesh sourceMesh, Mesh piercingMesh,
-            int[] resolvedRefIndices, Matrix4x4 sourceToPiercing)
+            int[] resolvedRefIndices, Matrix4x4 sourceToPiercing,
+            int[][] cachedAnchorIndices = null, Vector3[] cachedAnchorCentroids = null)
         {
             if (setup.mode == PiercingMode.Single && setup.perVertexBoneWeights)
             {
@@ -246,10 +252,10 @@ namespace PiercingTool.Editor
             }
             else // Chain / MultiAnchor
             {
-                var anchorIndices = ResolveAnchorIndices(setup);
+                var anchorIndices = cachedAnchorIndices ?? ResolveAnchorIndices(setup);
                 if (anchorIndices.Length < 2) return;
 
-                var anchorCentroids = ComputeAnchorCentroids(
+                var anchorCentroids = cachedAnchorCentroids ?? ComputeAnchorCentroids(
                     setup, sourceMesh, piercingMesh, anchorIndices, sourceToPiercing);
 
                 var segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(

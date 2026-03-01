@@ -495,9 +495,15 @@ namespace PiercingTool.Editor
 
             var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
             var allWeightsNative = new NativeArray<BoneWeight1>(allWeights, Allocator.Temp);
-            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
-            bonesPerVertexNative.Dispose();
-            allWeightsNative.Dispose();
+            try
+            {
+                piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
+            }
+            finally
+            {
+                bonesPerVertexNative.Dispose();
+                allWeightsNative.Dispose();
+            }
         }
 
         /// <summary>
@@ -560,9 +566,15 @@ namespace PiercingTool.Editor
 
             var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
             var allWeightsNative = new NativeArray<BoneWeight1>(allWeightsList.ToArray(), Allocator.Temp);
-            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
-            bonesPerVertexNative.Dispose();
-            allWeightsNative.Dispose();
+            try
+            {
+                piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
+            }
+            finally
+            {
+                bonesPerVertexNative.Dispose();
+                allWeightsNative.Dispose();
+            }
         }
 
         // =====================================================================
@@ -622,9 +634,15 @@ namespace PiercingTool.Editor
 
             var bonesPerVertexNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
             var allWeightsNative = new NativeArray<BoneWeight1>(allWeightsList.ToArray(), Allocator.Temp);
-            piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
-            bonesPerVertexNative.Dispose();
-            allWeightsNative.Dispose();
+            try
+            {
+                piercingMesh.SetBoneWeights(bonesPerVertexNative, allWeightsNative);
+            }
+            finally
+            {
+                bonesPerVertexNative.Dispose();
+                allWeightsNative.Dispose();
+            }
         }
 
         /// <summary>
