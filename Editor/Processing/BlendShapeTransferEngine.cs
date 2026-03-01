@@ -634,18 +634,21 @@ namespace PiercingTool.Editor
         private static int FindNearestTriangle(
             Vector3 point, Vector3[] vertices, int[] triangles)
         {
+            // 1. 最近傍頂点を見つける
+            int closestVertex = FindNearestVertex(point, vertices);
+
+            // 2. その頂点を共有する三角面に絞り、面上の最近傍点距離で判定
             float bestDistSq = float.MaxValue;
             int bestTriStart = -1;
 
             for (int i = 0; i < triangles.Length; i += 3)
             {
-                Vector3 v0 = vertices[triangles[i]];
-                Vector3 v1 = vertices[triangles[i + 1]];
-                Vector3 v2 = vertices[triangles[i + 2]];
+                int i0 = triangles[i], i1 = triangles[i + 1], i2 = triangles[i + 2];
+                if (i0 != closestVertex && i1 != closestVertex && i2 != closestVertex)
+                    continue;
 
-                // 三角面の重心までの距離で近似（高速化のため）
-                Vector3 centroid = (v0 + v1 + v2) / 3f;
-                float distSq = (point - centroid).sqrMagnitude;
+                float distSq = PointToTriangleDistanceSq(
+                    point, vertices[i0], vertices[i1], vertices[i2]);
 
                 if (distSq < bestDistSq)
                 {
@@ -654,7 +657,108 @@ namespace PiercingTool.Editor
                 }
             }
 
+            // フォールバック: 孤立頂点（三角面なし）の場合
+            if (bestTriStart < 0)
+            {
+                bestDistSq = float.MaxValue;
+                for (int i = 0; i < triangles.Length; i += 3)
+                {
+                    Vector3 centroid = (vertices[triangles[i]] +
+                        vertices[triangles[i + 1]] + vertices[triangles[i + 2]]) / 3f;
+                    float distSq = (point - centroid).sqrMagnitude;
+                    if (distSq < bestDistSq)
+                    {
+                        bestDistSq = distSq;
+                        bestTriStart = i;
+                    }
+                }
+            }
+
             return bestTriStart;
+        }
+
+        /// <summary>
+        /// 点から三角面上の最近傍点までの距離の二乗を返す。
+        /// バリセントリック座標をクランプして面上に射影する。
+        /// </summary>
+        private static float PointToTriangleDistanceSq(
+            Vector3 point, Vector3 v0, Vector3 v1, Vector3 v2)
+        {
+            Vector3 edge0 = v1 - v0;
+            Vector3 edge1 = v2 - v0;
+            Vector3 v0ToPoint = point - v0;
+
+            float a = Vector3.Dot(edge0, edge0);
+            float b = Vector3.Dot(edge0, edge1);
+            float c = Vector3.Dot(edge1, edge1);
+            float d = Vector3.Dot(edge0, v0ToPoint);
+            float e = Vector3.Dot(edge1, v0ToPoint);
+
+            float det = a * c - b * b;
+            float s = b * e - c * d;
+            float t = b * d - a * e;
+
+            // バリセントリック座標を三角面内にクランプ
+            if (s + t <= det)
+            {
+                if (s < 0)
+                {
+                    if (t < 0)
+                    {
+                        // region 4
+                        if (d < 0) { s = Clamp01(-d / a); t = 0; }
+                        else { s = 0; t = Clamp01(-e / c); }
+                    }
+                    else
+                    {
+                        // region 3
+                        s = 0; t = Clamp01(-e / c);
+                    }
+                }
+                else if (t < 0)
+                {
+                    // region 5
+                    s = Clamp01(-d / a); t = 0;
+                }
+                else
+                {
+                    // region 0 (inside triangle)
+                    float invDet = 1f / det;
+                    s *= invDet; t *= invDet;
+                }
+            }
+            else
+            {
+                if (s < 0)
+                {
+                    // region 2
+                    float tmp0 = b + d, tmp1 = c + e;
+                    if (tmp1 > tmp0) { float numer = tmp1 - tmp0; float denom = a - 2 * b + c; s = Clamp01(numer / denom); t = 1 - s; }
+                    else { s = 0; t = Clamp01(-e / c); }
+                }
+                else if (t < 0)
+                {
+                    // region 6
+                    float tmp0 = b + e, tmp1 = a + d;
+                    if (tmp1 > tmp0) { float numer = tmp1 - tmp0; float denom = a - 2 * b + c; t = Clamp01(numer / denom); s = 1 - t; }
+                    else { t = 0; s = Clamp01(-d / a); }
+                }
+                else
+                {
+                    // region 1
+                    float numer = (c + e) - (b + d);
+                    float denom = a - 2 * b + c;
+                    s = Clamp01(numer / denom); t = 1 - s;
+                }
+            }
+
+            Vector3 closest = v0 + s * edge0 + t * edge1;
+            return (point - closest).sqrMagnitude;
+        }
+
+        private static float Clamp01(float v)
+        {
+            return v < 0f ? 0f : (v > 1f ? 1f : v);
         }
 
         /// <summary>最寄りの頂点インデックスを返す。</summary>
@@ -684,7 +788,11 @@ namespace PiercingTool.Editor
         {
             var result = new Vector3[indices.Length];
             for (int i = 0; i < indices.Length; i++)
-                result[i] = allPositions[indices[i]];
+            {
+                int idx = indices[i];
+                result[i] = (idx >= 0 && idx < allPositions.Length)
+                    ? allPositions[idx] : Vector3.zero;
+            }
             return result;
         }
 
@@ -697,6 +805,18 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// bonesPerVertex からプレフィックスサム配列を構築する。
+        /// prefixSum[vi] = 頂点 vi のボーンウェイト開始オフセット。
+        /// </summary>
+        private static int[] BuildBoneWeightPrefixSum(Unity.Collections.NativeArray<byte> bonesPerVertex)
+        {
+            var prefixSum = new int[bonesPerVertex.Length + 1];
+            for (int i = 0; i < bonesPerVertex.Length; i++)
+                prefixSum[i + 1] = prefixSum[i] + bonesPerVertex[i];
+            return prefixSum;
+        }
+
+        /// <summary>
         /// 参照頂点のボーンウェイトを指定の重みで加重平均する（バリセントリック補間用）。
         /// </summary>
         private static Dictionary<int, float> ComputeWeightedBoneWeights(
@@ -704,18 +824,17 @@ namespace PiercingTool.Editor
         {
             var sourceWeights = mesh.GetAllBoneWeights();
             var sourceBonesPerVertex = mesh.GetBonesPerVertex();
+            var prefixSum = BuildBoneWeightPrefixSum(sourceBonesPerVertex);
             var weightMap = new Dictionary<int, float>();
 
             for (int j = 0; j < indices.Length; j++)
             {
                 int vi = indices[j];
+                if (vi < 0 || vi >= sourceBonesPerVertex.Length) continue;
                 float vertWeight = vertexWeights[j];
-
-                int offset = 0;
-                for (int i = 0; i < vi; i++)
-                    offset += sourceBonesPerVertex[i];
-
+                int offset = prefixSum[vi];
                 int count = sourceBonesPerVertex[vi];
+
                 for (int i = 0; i < count; i++)
                 {
                     var bw = sourceWeights[offset + i];
@@ -732,15 +851,15 @@ namespace PiercingTool.Editor
         {
             var sourceWeights = mesh.GetAllBoneWeights();
             var sourceBonesPerVertex = mesh.GetBonesPerVertex();
+            var prefixSum = BuildBoneWeightPrefixSum(sourceBonesPerVertex);
             var weightMap = new Dictionary<int, float>();
 
             foreach (int vi in indices)
             {
-                int offset = 0;
-                for (int i = 0; i < vi; i++)
-                    offset += sourceBonesPerVertex[i];
-
+                if (vi < 0 || vi >= sourceBonesPerVertex.Length) continue;
+                int offset = prefixSum[vi];
                 int count = sourceBonesPerVertex[vi];
+
                 for (int i = 0; i < count; i++)
                 {
                     var bw = sourceWeights[offset + i];

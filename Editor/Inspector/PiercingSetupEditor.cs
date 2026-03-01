@@ -817,7 +817,7 @@ namespace PiercingTool.Editor
             if (setup.mode == PiercingMode.Single && setup.referenceVertices.Count == 0)
             {
                 var autoSelected = MeshGenerator.FindClosestTriangleVertices(
-                    setup.targetRenderer, setup.transform.position);
+                    setup.targetRenderer, GetPiercingMeshWorldCenter(setup));
                 setup.referenceVertices.AddRange(autoSelected);
                 Debug.Log($"[PiercingTool] 参照頂点を自動選択しました: {string.Join(", ", autoSelected)}");
             }
