@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Unity.Collections;
 using UnityEngine;
 using UnityEditor;
 
@@ -38,6 +39,39 @@ namespace PiercingTool.Editor
                 BakePiercingBlendShapes(piercingMesh, setup.savedPiercingBlendShapeWeights);
             }
 
+            bool isHybridMode = setup.skipBoneWeightTransfer &&
+                                setup.fixedPiercingVertices.Count > 0;
+
+            // ハイブリッドモード: 中心頂点+半径から固定頂点セットを展開
+            List<int> expandedFixedVertices = null;
+            if (isHybridMode)
+            {
+                expandedFixedVertices = ExpandFixedVertices(
+                    piercingMesh, setup.fixedPiercingVertices, setup.fixedPiercingRadius);
+            }
+
+            // ピアスがSMRでボーン変形されている場合、その変位を頂点に焼き込む
+            // （ユーザーがHeadボーン等を動かして配置した位置を反映する）
+            // ただし skipBoneWeightTransfer 時はピアスのボーン構造を維持するので焼き込まない
+            // （ボーンが実行時に頂点を変形するため、焼き込むと二重変形になる）
+            // ハイブリッドモードでは固定頂点のみベイク（顔ボーンに切り替わるため必要）
+            if (!setup.skipBoneWeightTransfer)
+            {
+                var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (piercingSmr != null && piercingSmr.sharedMesh != null)
+                {
+                    BakeBoneDisplacement(piercingSmr, piercingMesh);
+                }
+            }
+            else if (isHybridMode)
+            {
+                var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (piercingSmr != null && piercingSmr.sharedMesh != null)
+                {
+                    BakeBoneDisplacementPartial(piercingSmr, piercingMesh, expandedFixedVertices);
+                }
+            }
+
             // ソースメッシュ→ピアスメッシュの座標変換行列
             // 回転とスケールの違いを補正してBlendShapeデルタを正しく変換する
             var sourceToPiercing = setup.transform.worldToLocalMatrix *
@@ -59,8 +93,16 @@ namespace PiercingTool.Editor
             bool isChainOrMulti = setup.mode != PiercingMode.Single;
             if (setup.mode == PiercingMode.Single)
             {
-                var refIndicesArr = setup.referenceVertices.ToArray();
-                var piercingWorldPos = GetPiercingMeshWorldCenter(setup);
+                // ハイブリッドモードでは保存済み参照頂点を無視し、固定頂点の重心から自動検出
+                // （referenceVertices はUndo・モード切替用に内部で保持）
+                var refIndicesArr = isHybridMode
+                    ? new int[0]
+                    : setup.referenceVertices.ToArray();
+
+                // ハイブリッドモードでは固定頂点の重心を基準に参照頂点を自動検出
+                var piercingWorldPos = isHybridMode
+                    ? ComputeFixedVerticesCentroid(setup)
+                    : GetPiercingMeshWorldCenter(setup);
 
                 if (setup.maintainOverallShape && refIndicesArr.Length == 0)
                 {
@@ -78,10 +120,12 @@ namespace PiercingTool.Editor
                 resolvedRefIndices = refIndicesArr;
 
                 // 配置時にBlendShapeが有効な場合、ピアス頂点をBASE状態に補正
+                // ハイブリッドモードではPhysBone頂点を除外（bindposeとの整合を保つ）
                 CorrectPiercingToBasePosition(
                     setup.targetRenderer, sourceMesh, piercingMesh,
                     refIndicesArr, sourceToPiercing,
-                    setup.savedBlendShapeWeights);
+                    setup.savedBlendShapeWeights,
+                    isHybridMode ? new HashSet<int>(expandedFixedVertices) : null);
 
                 transferred = BlendShapeTransferEngine.TransferBlendShapesSingle(
                     sourceMesh, piercingMesh,
@@ -121,22 +165,49 @@ namespace PiercingTool.Editor
                 resolvedRefIndices = allRefIndices.ToArray();
             }
 
+            // ハイブリッドモード: PhysBone頂点のBlendShapeデルタをゼロクリア
+            if (isHybridMode)
+            {
+                ZeroOutNonFixedBlendShapeDeltas(piercingMesh, expandedFixedVertices);
+            }
+
             // ボーンウェイト・bindpose設定
-            if (!setup.skipBoneWeightTransfer)
+            if (isHybridMode)
+            {
+                // ハイブリッドモード: 固定頂点は顔ウェイト、残りは元のPhysBoneウェイト
+                TransferBoneWeightsHybrid(setup, sourceMesh, piercingMesh, resolvedRefIndices, expandedFixedVertices);
+
+                // bindpose: ターゲットボーン分 + ピアスボーン分を結合
+                var targetBindposes = ComputeBindposes(setup);
+                var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                var piercingBindposes = piercingSmr != null && piercingSmr.sharedMesh != null
+                    ? piercingSmr.sharedMesh.bindposes
+                    : new Matrix4x4[0];
+
+                var mergedBindposes = new Matrix4x4[targetBindposes.Length + piercingBindposes.Length];
+                System.Array.Copy(targetBindposes, 0, mergedBindposes, 0, targetBindposes.Length);
+                System.Array.Copy(piercingBindposes, 0, mergedBindposes, targetBindposes.Length,
+                    piercingBindposes.Length);
+                piercingMesh.bindposes = mergedBindposes;
+
+                NormalizeMeshScale(piercingMesh, setup);
+            }
+            else if (!setup.skipBoneWeightTransfer)
             {
                 TransferBoneWeights(setup, sourceMesh, piercingMesh,
                     resolvedRefIndices, sourceToPiercing,
                     isChainOrMulti ? anchorIndices : null,
                     isChainOrMulti ? anchorCentroids : null);
 
-                // ピアスメッシュの座標系に合ったbindposeを計算する
-                // bindpose[i] = bone[i].worldToLocal * mesh.localToWorld
-                // （ソースのbindposeはソースメッシュの座標系用なのでコピー不可）
-                var bindposes = ComputeBindposes(setup);
-                piercingMesh.bindposes = bindposes;
+                // 統合モードでは bindpose/スケール補正は不要
+                // （ピアス頂点はターゲット空間に変換されるため）
+                if (!setup.mergeIntoTarget)
+                {
+                    var bindposes = ComputeBindposes(setup);
+                    piercingMesh.bindposes = bindposes;
 
-                // 非一様スケール補正: スケールをメッシュにベイクしてボーン行列から除去
-                NormalizeMeshScale(piercingMesh, setup);
+                    NormalizeMeshScale(piercingMesh, setup);
+                }
             }
 
             return piercingMesh;
@@ -216,6 +287,106 @@ namespace PiercingTool.Editor
             piercingMesh.RecalculateBounds();
         }
 
+        /// <summary>
+        /// SMR のボーン変形による頂点変位をピアスメッシュに焼き込む。
+        /// BlendShape の影響を除外するため、一時的にウェイトをゼロにして BakeMesh する。
+        /// </summary>
+        private static void BakeBoneDisplacement(SkinnedMeshRenderer smr, Mesh piercingMesh)
+        {
+            var sharedMesh = smr.sharedMesh;
+            int bsCount = sharedMesh.blendShapeCount;
+
+            // BlendShape ウェイトを一時的にゼロにしてボーン変形のみを取得
+            var savedWeights = new float[bsCount];
+            for (int i = 0; i < bsCount; i++)
+            {
+                savedWeights[i] = smr.GetBlendShapeWeight(i);
+                smr.SetBlendShapeWeight(i, 0f);
+            }
+
+            var bakedMesh = new Mesh();
+            smr.BakeMesh(bakedMesh);
+            var bakedVerts = bakedMesh.vertices;
+            Object.DestroyImmediate(bakedMesh);
+
+            // ウェイトを復元
+            for (int i = 0; i < bsCount; i++)
+                smr.SetBlendShapeWeight(i, savedWeights[i]);
+
+            // ボーン変位 = BakeMesh(weights=0) - sharedMesh.vertices
+            var bindVerts = sharedMesh.vertices;
+            var verts = piercingMesh.vertices;
+            bool hasDisplacement = false;
+            for (int i = 0; i < verts.Length && i < bakedVerts.Length; i++)
+            {
+                var disp = bakedVerts[i] - bindVerts[i];
+                if (disp.sqrMagnitude > 0.000001f)
+                {
+                    verts[i] += disp;
+                    hasDisplacement = true;
+                }
+            }
+
+            if (hasDisplacement)
+            {
+                piercingMesh.vertices = verts;
+                piercingMesh.RecalculateBounds();
+            }
+        }
+
+        /// <summary>
+        /// SMR のボーン変形による頂点変位を、指定された頂点のみに焼き込む。
+        /// ハイブリッドモード用: 固定頂点は顔ボーンに切り替わるため変位のベイクが必要だが、
+        /// PhysBone 頂点は元のボーンが実行時に変形するためベイクすると二重変形になる。
+        /// </summary>
+        private static void BakeBoneDisplacementPartial(
+            SkinnedMeshRenderer smr, Mesh piercingMesh, List<int> targetVertices)
+        {
+            var sharedMesh = smr.sharedMesh;
+            int bsCount = sharedMesh.blendShapeCount;
+
+            // BlendShape ウェイトを一時的にゼロにしてボーン変形のみを取得
+            var savedWeights = new float[bsCount];
+            for (int i = 0; i < bsCount; i++)
+            {
+                savedWeights[i] = smr.GetBlendShapeWeight(i);
+                smr.SetBlendShapeWeight(i, 0f);
+            }
+
+            var bakedMesh = new Mesh();
+            smr.BakeMesh(bakedMesh);
+            var bakedVerts = bakedMesh.vertices;
+            Object.DestroyImmediate(bakedMesh);
+
+            // ウェイトを復元
+            for (int i = 0; i < bsCount; i++)
+                smr.SetBlendShapeWeight(i, savedWeights[i]);
+
+            // 指定頂点のみにボーン変位を適用
+            var bindVerts = sharedMesh.vertices;
+            var verts = piercingMesh.vertices;
+            var targetSet = new HashSet<int>(targetVertices);
+            bool hasDisplacement = false;
+
+            for (int i = 0; i < verts.Length && i < bakedVerts.Length; i++)
+            {
+                if (!targetSet.Contains(i)) continue;
+
+                var disp = bakedVerts[i] - bindVerts[i];
+                if (disp.sqrMagnitude > 0.000001f)
+                {
+                    verts[i] += disp;
+                    hasDisplacement = true;
+                }
+            }
+
+            if (hasDisplacement)
+            {
+                piercingMesh.vertices = verts;
+                piercingMesh.RecalculateBounds();
+            }
+        }
+
         private static void TransferBoneWeights(
             PiercingSetup setup, Mesh sourceMesh, Mesh piercingMesh,
             int[] resolvedRefIndices, Matrix4x4 sourceToPiercing,
@@ -267,6 +438,106 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// ハイブリッドボーンウェイト転写:
+        /// fixedPiercingVertices → 顔ボーンウェイト（ターゲットボーン範囲）
+        /// それ以外 → 元のピアスボーンウェイト（インデックスをターゲットボーン数分オフセット）
+        /// </summary>
+        private static void TransferBoneWeightsHybrid(
+            PiercingSetup setup, Mesh sourceMesh, Mesh piercingMesh,
+            int[] resolvedRefIndices, List<int> expandedFixedVertices)
+        {
+            int targetBoneCount = setup.targetRenderer.bones.Length;
+            var fixedSet = new HashSet<int>(expandedFixedVertices);
+
+            // 固定頂点用: 顔ボーンウェイトを計算
+            var refIndices = resolvedRefIndices ?? setup.referenceVertices.ToArray();
+            float[] baryWeights = null;
+            if (refIndices.Length == 3)
+            {
+                var deformedRefPos = ComputeDeformedRefPositions(
+                    setup.targetRenderer, sourceMesh, refIndices,
+                    setup.savedBlendShapeWeights);
+                var attachLocal = setup.targetRenderer.transform
+                    .InverseTransformPoint(setup.transform.position);
+                var bary = BlendShapeTransferEngine.ComputeBarycentricCoords(
+                    attachLocal, deformedRefPos[0], deformedRefPos[1], deformedRefPos[2]);
+                baryWeights = new float[] { bary.x, bary.y, bary.z };
+            }
+
+            Dictionary<int, float> faceWeighted;
+            if (baryWeights != null && baryWeights.Length == refIndices.Length)
+                faceWeighted = BlendShapeTransferEngine.ComputeWeightedBoneWeights(
+                    sourceMesh, refIndices, baryWeights);
+            else
+                faceWeighted = BlendShapeTransferEngine.ComputeAverageBoneWeights(
+                    sourceMesh, refIndices);
+            var faceSorted = BlendShapeTransferEngine.NormalizeAndSort(faceWeighted);
+
+            // 元のピアスボーンウェイトを読み取り（managed にコピー）
+            var origBpvNative = piercingMesh.GetBonesPerVertex();
+            var origBpvData = origBpvNative.IsCreated ? origBpvNative.ToArray() : new byte[0];
+            var origWeightsNative = piercingMesh.GetAllBoneWeights();
+            var origWeightsData = origWeightsNative.IsCreated
+                ? origWeightsNative.ToArray() : new BoneWeight1[0];
+
+            // ハイブリッドウェイト構築
+            int piercingVertexCount = piercingMesh.vertexCount;
+            var bonesPerVertex = new byte[piercingVertexCount];
+            var allWeightsList = new List<BoneWeight1>();
+
+            int origWeightIdx = 0;
+            for (int vi = 0; vi < piercingVertexCount; vi++)
+            {
+                int origCount = vi < origBpvData.Length ? origBpvData[vi] : 0;
+
+                if (fixedSet.Contains(vi))
+                {
+                    // 固定頂点: 顔ボーンウェイト（インデックスはターゲットボーン範囲 0~N-1）
+                    byte boneCount = (byte)Mathf.Min(faceSorted.Count, 4);
+                    bonesPerVertex[vi] = boneCount;
+                    for (int i = 0; i < boneCount; i++)
+                        allWeightsList.Add(faceSorted[i]);
+                }
+                else
+                {
+                    // PhysBone頂点: 元のボーンウェイト（インデックスにtargetBoneCountを加算）
+                    if (origCount > 0)
+                    {
+                        bonesPerVertex[vi] = (byte)origCount;
+                        for (int i = 0; i < origCount; i++)
+                        {
+                            var w = origWeightsData[origWeightIdx + i];
+                            w.boneIndex += targetBoneCount;
+                            allWeightsList.Add(w);
+                        }
+                    }
+                    else
+                    {
+                        // ウェイトがない場合のフォールバック
+                        bonesPerVertex[vi] = 1;
+                        allWeightsList.Add(new BoneWeight1 { boneIndex = 0, weight = 1f });
+                    }
+                }
+
+                origWeightIdx += origCount;
+            }
+
+            // メッシュに設定
+            var bpvNative = new NativeArray<byte>(bonesPerVertex, Allocator.Temp);
+            var weightsNative = new NativeArray<BoneWeight1>(
+                allWeightsList.ToArray(), Allocator.Temp);
+            try
+            {
+                piercingMesh.SetBoneWeights(bpvNative, weightsNative);
+            }
+            finally
+            {
+                bpvNative.Dispose();
+                weightsNative.Dispose();
+            }
+        }
+
+        /// <summary>
         /// ピアスメッシュの座標系に合ったbindposeを計算する。
         /// bindpose[i] = bone[i].worldToLocal * piercingTransform.localToWorld
         /// これにより「ピアスのローカル頂点 → ワールド → ボーンローカル」の変換が正しく行われる。
@@ -299,7 +570,8 @@ namespace PiercingTool.Editor
         private static void CorrectPiercingToBasePosition(
             SkinnedMeshRenderer renderer, Mesh sourceMesh, Mesh piercingMesh,
             int[] referenceIndices, Matrix4x4 sourceToPiercing,
-            float[] overrideWeights = null)
+            float[] overrideWeights = null,
+            HashSet<int> affectedVertices = null)
         {
             // ソース空間で変形前/後の位置を取得
             var baseRefPosSrc = BlendShapeTransferEngine.ExtractPositions(
@@ -342,11 +614,16 @@ namespace PiercingTool.Editor
                 return;
 
             // ピアス空間で直接逆変換を適用（頂点位置のみ）
+            // affectedVertices が指定されている場合、その頂点のみ補正
+            // （ハイブリッドモード: PhysBone頂点はbindposeとの整合を保つため補正しない）
             var invRotation = Quaternion.Inverse(rotation);
             var vertices = piercingMesh.vertices;
 
             for (int i = 0; i < vertices.Length; i++)
+            {
+                if (affectedVertices != null && !affectedVertices.Contains(i)) continue;
                 vertices[i] = invRotation * (vertices[i] - deformedCentroid) + baseCentroid;
+            }
 
             piercingMesh.vertices = vertices;
         }
@@ -427,6 +704,7 @@ namespace PiercingTool.Editor
         /// <summary>
         /// ピアスメッシュのバウンディングボックス中心をワールド座標で返す。
         /// transform.position（原点）ではなく実際のメッシュ位置を返す。
+        /// SMR の場合は BakeMesh でボーン変形後の位置を取得する。
         /// </summary>
         private static Vector3 GetPiercingMeshWorldCenter(PiercingSetup setup)
         {
@@ -436,9 +714,62 @@ namespace PiercingTool.Editor
 
             var smr = setup.GetComponent<SkinnedMeshRenderer>();
             if (smr != null && smr.sharedMesh != null)
-                return setup.transform.TransformPoint(smr.sharedMesh.bounds.center);
+            {
+                var bakedMesh = new Mesh();
+                smr.BakeMesh(bakedMesh);
+                var center = setup.transform.TransformPoint(bakedMesh.bounds.center);
+                Object.DestroyImmediate(bakedMesh);
+                return center;
+            }
 
             return setup.transform.position;
+        }
+
+        /// <summary>
+        /// 固定頂点（fixedPiercingVertices）の重心をワールド座標で返す。
+        /// ハイブリッドモードで参照頂点の自動検出基準として使用する。
+        /// </summary>
+        private static Vector3 ComputeFixedVerticesCentroid(PiercingSetup setup)
+        {
+            Vector3[] verts = null;
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null)
+            {
+                verts = mf.sharedMesh.vertices;
+            }
+            else
+            {
+                var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (smr != null && smr.sharedMesh != null)
+                {
+                    // SMRはボーン変形後の実際の頂点位置を使用
+                    // （バインドポーズ位置だとボーン移動分ずれて参照頂点の検出が狂う）
+                    var bakedMesh = new Mesh();
+                    smr.BakeMesh(bakedMesh);
+                    verts = bakedMesh.vertices;
+                    Object.DestroyImmediate(bakedMesh);
+                }
+            }
+
+            if (verts == null || setup.fixedPiercingVertices.Count == 0)
+                return setup.transform.position;
+
+            var sum = Vector3.zero;
+            int count = 0;
+            foreach (int vi in setup.fixedPiercingVertices)
+            {
+                if (vi >= 0 && vi < verts.Length)
+                {
+                    sum += verts[vi];
+                    count++;
+                }
+            }
+
+            if (count == 0)
+                return setup.transform.position;
+
+            var localCentroid = sum / count;
+            return setup.transform.TransformPoint(localCentroid);
         }
 
         /// <summary>
@@ -623,6 +954,84 @@ namespace PiercingTool.Editor
             }
 
             mesh.RecalculateBounds();
+        }
+
+        /// <summary>
+        /// 中心頂点 + 半径から、範囲内の全頂点インデックスを返す。
+        /// ピアスメッシュのローカル空間で距離計算する。
+        /// </summary>
+        public static List<int> ExpandFixedVertices(
+            Mesh piercingMesh, List<int> centerVertices, float radius)
+        {
+            var vertices = piercingMesh.vertices;
+            var result = new HashSet<int>();
+            float radiusSq = radius * radius;
+
+            foreach (int ci in centerVertices)
+            {
+                if (ci < 0 || ci >= vertices.Length) continue;
+                var center = vertices[ci];
+                result.Add(ci); // 中心頂点自体は常に含む
+
+                for (int i = 0; i < vertices.Length; i++)
+                {
+                    if ((vertices[i] - center).sqrMagnitude <= radiusSq)
+                        result.Add(i);
+                }
+            }
+
+            return new List<int>(result);
+        }
+
+        /// <summary>
+        /// fixedPiercingVertices に含まれない頂点の BlendShape デルタをゼロにする。
+        /// PhysBone で制御される頂点に BlendShape の影響が及ばないようにする。
+        /// </summary>
+        private static void ZeroOutNonFixedBlendShapeDeltas(Mesh mesh, List<int> fixedVertices)
+        {
+            int bsCount = mesh.blendShapeCount;
+            if (bsCount == 0) return;
+
+            int vtxCount = mesh.vertexCount;
+            var fixedSet = new HashSet<int>(fixedVertices);
+
+            // 全BlendShapeデータを読み取り
+            var frames = new List<(string name, float weight, Vector3[] dv, Vector3[] dn, Vector3[] dt)>();
+            var tmpDV = new Vector3[vtxCount];
+            var tmpDN = new Vector3[vtxCount];
+            var tmpDT = new Vector3[vtxCount];
+
+            for (int si = 0; si < bsCount; si++)
+            {
+                string name = mesh.GetBlendShapeName(si);
+                int fCount = mesh.GetBlendShapeFrameCount(si);
+                for (int fi = 0; fi < fCount; fi++)
+                {
+                    float w = mesh.GetBlendShapeFrameWeight(si, fi);
+                    mesh.GetBlendShapeFrameVertices(si, fi, tmpDV, tmpDN, tmpDT);
+
+                    var dv = (Vector3[])tmpDV.Clone();
+                    var dn = (Vector3[])tmpDN.Clone();
+                    var dt = (Vector3[])tmpDT.Clone();
+
+                    // 固定頂点以外のデルタをゼロクリア
+                    for (int i = 0; i < vtxCount; i++)
+                    {
+                        if (!fixedSet.Contains(i))
+                        {
+                            dv[i] = Vector3.zero;
+                            dn[i] = Vector3.zero;
+                            dt[i] = Vector3.zero;
+                        }
+                    }
+
+                    frames.Add((name, w, dv, dn, dt));
+                }
+            }
+
+            mesh.ClearBlendShapes();
+            foreach (var (name, w, dv, dn, dt) in frames)
+                mesh.AddBlendShapeFrame(name, w, dv, dn, dt);
         }
 
         /// <summary>

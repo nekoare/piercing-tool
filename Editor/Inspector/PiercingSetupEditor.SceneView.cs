@@ -14,6 +14,9 @@ namespace PiercingTool.Editor
         private static readonly Color ColorDegenerate = new Color(1f, 0.4f, 0f, 1f);
         private static readonly Color ColorAutoSelect = new Color(1f, 0.85f, 0f, 1f);
         private static readonly Color ColorNormal = new Color(0.3f, 0.5f, 1f, 0.9f);
+        private static readonly Color ColorFixedCenter = new Color(1f, 0.3f, 0.3f, 1f);
+        private static readonly Color ColorFixedRange = new Color(1f, 0.7f, 0.3f, 0.6f);
+        private static readonly Color ColorFixedSphere = new Color(0f, 0f, 0f, 0.35f);
 
         private static readonly Color[] AnchorColors = new Color[]
         {
@@ -32,6 +35,11 @@ namespace PiercingTool.Editor
         private static int s_bakeCache_frame = -1;
         private static Vector3[] s_bakeCache_result;
 
+        // ピアスメッシュ用キャッシュ
+        private static int s_piercingBakeCache_id;
+        private static int s_piercingBakeCache_frame = -1;
+        private static Vector3[] s_piercingBakeCache_result;
+
         private void DrawSceneVisualization(SceneView sceneView)
         {
             var setup = target as PiercingSetup;
@@ -40,13 +48,22 @@ namespace PiercingTool.Editor
             var worldVertices = BakeWorldVertices(setup.targetRenderer);
             if (worldVertices == null) return;
 
+            // ハイブリッドモード: 固定範囲の球ギズモ + 範囲内頂点ハイライト
+            bool isHybridMode = setup.skipBoneWeightTransfer &&
+                                setup.fixedPiercingVertices.Count > 0;
+            if (isHybridMode)
+            {
+                DrawFixedVertexSpheres(setup, sceneView);
+            }
+
             if (setup.mode == PiercingMode.Single)
             {
-                if (setup.referenceVertices.Count > 0)
+                // ハイブリッドモードでは参照頂点の表示をスキップ
+                if (!isHybridMode && setup.referenceVertices.Count > 0)
                 {
                     DrawVertexGroup(setup.referenceVertices, worldVertices, sceneView);
                 }
-                else if (_autoDetectedVertices != null)
+                else if (!isHybridMode && _autoDetectedVertices != null)
                 {
                     DrawVertexGroup(
                         new List<int>(_autoDetectedVertices), worldVertices, sceneView,
@@ -110,6 +127,118 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// ピアスメッシュのワールド頂点座標を取得する（キャッシュ付き）。
+        /// SMR の場合は BakeMesh でボーン変形後の位置を返す。
+        /// </summary>
+        private static Vector3[] BakePiercingWorldVertices(PiercingSetup setup)
+        {
+            int id = setup.GetInstanceID();
+            int frame = UnityEngine.Time.frameCount;
+            if (frame == s_piercingBakeCache_frame && id == s_piercingBakeCache_id
+                && s_piercingBakeCache_result != null)
+                return s_piercingBakeCache_result;
+
+            Vector3[] localVerts = null;
+            var tr = setup.transform;
+
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null && (mf.hideFlags & HideFlags.DontSave) == 0)
+            {
+                localVerts = mf.sharedMesh.vertices;
+            }
+            else
+            {
+                var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (smr != null && smr.sharedMesh != null)
+                {
+                    var bakedMesh = new Mesh();
+                    smr.BakeMesh(bakedMesh);
+                    localVerts = bakedMesh.vertices;
+                    Object.DestroyImmediate(bakedMesh);
+                }
+            }
+
+            if (localVerts == null) return null;
+
+            var worldVerts = new Vector3[localVerts.Length];
+            for (int i = 0; i < localVerts.Length; i++)
+                worldVerts[i] = tr.TransformPoint(localVerts[i]);
+
+            s_piercingBakeCache_id = id;
+            s_piercingBakeCache_frame = frame;
+            s_piercingBakeCache_result = worldVerts;
+            return worldVerts;
+        }
+
+        /// <summary>
+        /// ハイブリッドモードの固定範囲を可視化する。
+        /// 各中心頂点に球ギズモ、範囲内頂点にドットを描画。
+        /// </summary>
+        private static void DrawFixedVertexSpheres(PiercingSetup setup, SceneView sceneView)
+        {
+            var piercingWorldVerts = BakePiercingWorldVertices(setup);
+            if (piercingWorldVerts == null) return;
+
+            // ピアスメッシュのローカル頂点（距離計算用）
+            Mesh piercingMesh = null;
+            var mf = setup.GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != null && (mf.hideFlags & HideFlags.DontSave) == 0)
+                piercingMesh = mf.sharedMesh;
+            else
+            {
+                var smr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (smr != null && smr.sharedMesh != null)
+                    piercingMesh = smr.sharedMesh;
+            }
+            if (piercingMesh == null) return;
+
+            // 展開済み固定頂点セットを計算
+            var expanded = MeshGenerator.ExpandFixedVertices(
+                piercingMesh, setup.fixedPiercingVertices, setup.fixedPiercingRadius);
+            var expandedSet = new HashSet<int>(expanded);
+            var centerSet = new HashSet<int>(setup.fixedPiercingVertices);
+
+            var cam = sceneView.camera;
+            var camForward = cam.transform.forward;
+
+            // 各中心頂点に球ギズモを描画
+            foreach (int ci in setup.fixedPiercingVertices)
+            {
+                if (ci < 0 || ci >= piercingWorldVerts.Length) continue;
+                var centerWorld = piercingWorldVerts[ci];
+
+                // ローカル空間の半径をワールド空間に変換（平均スケール）
+                var ltw = setup.transform.localToWorldMatrix;
+                float sx = new Vector3(ltw.m00, ltw.m10, ltw.m20).magnitude;
+                float sy = new Vector3(ltw.m01, ltw.m11, ltw.m21).magnitude;
+                float sz = new Vector3(ltw.m02, ltw.m12, ltw.m22).magnitude;
+                float worldRadius = setup.fixedPiercingRadius * (sx + sy + sz) / 3f;
+
+                // 3軸のワイヤーディスクで球を表現
+                Handles.color = ColorFixedSphere;
+                Handles.DrawWireDisc(centerWorld, Vector3.up, worldRadius, 2f);
+                Handles.DrawWireDisc(centerWorld, Vector3.right, worldRadius, 2f);
+                Handles.DrawWireDisc(centerWorld, Vector3.forward, worldRadius, 2f);
+
+                // 中心頂点ドット
+                Handles.color = ColorFixedCenter;
+                float dotSize = HandleUtility.GetHandleSize(centerWorld) * 0.015f;
+                Handles.DrawSolidDisc(centerWorld, camForward, dotSize);
+            }
+
+            // 範囲内頂点をドットで表示（中心頂点以外）
+            Handles.color = ColorFixedRange;
+            foreach (int vi in expanded)
+            {
+                if (centerSet.Contains(vi)) continue;
+                if (vi < 0 || vi >= piercingWorldVerts.Length) continue;
+                var pos = piercingWorldVerts[vi];
+                float dotSize = HandleUtility.GetHandleSize(pos) * 0.008f;
+                Handles.DrawSolidDisc(pos, camForward, dotSize);
+            }
+        }
+
+        /// <summary>
         /// ワールド座標の頂点配列から、targetPosに最も近い三角面の3頂点インデックスを返す。
         /// </summary>
         private static int[] FindClosestTriangle(Vector3[] worldVertices, int[] triangles, Vector3 targetPos)
@@ -118,6 +247,7 @@ namespace PiercingTool.Editor
         /// <summary>
         /// ピアスメッシュのバウンディングボックス中心をワールド座標で返す。
         /// transform.position（原点）ではなく実際のメッシュ位置を返す。
+        /// SMR の場合は BakeMesh でボーン変形後の位置を取得する。
         /// </summary>
         private static Vector3 GetPiercingMeshWorldCenter(PiercingSetup setup)
         {
@@ -127,7 +257,13 @@ namespace PiercingTool.Editor
 
             var smr = setup.GetComponent<SkinnedMeshRenderer>();
             if (smr != null && smr.sharedMesh != null)
-                return setup.transform.TransformPoint(smr.sharedMesh.bounds.center);
+            {
+                var bakedMesh = new Mesh();
+                smr.BakeMesh(bakedMesh);
+                var center = setup.transform.TransformPoint(bakedMesh.bounds.center);
+                Object.DestroyImmediate(bakedMesh);
+                return center;
+            }
 
             return setup.transform.position;
         }

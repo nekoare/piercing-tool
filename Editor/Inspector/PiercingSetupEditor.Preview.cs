@@ -33,6 +33,7 @@ namespace PiercingTool.Editor
             // SMR ピアスのプレビュー用
             public bool isSmrPiercing;
             public MeshRenderer tempMeshRenderer;
+            public Vector3[] boneDisplacement; // ボーン変形による変位（SMR時のみ非null）
         }
 
         private static readonly Dictionary<int, PreviewState> s_previews =
@@ -361,6 +362,32 @@ namespace PiercingTool.Editor
                 }
 
                 state.originalVertices = state.previewMesh.vertices;
+
+                // BakeMesh でボーン変形後の頂点を取得し、バインドポーズとの差分を記録
+                var bakedMesh = new Mesh();
+                piercingSmr.BakeMesh(bakedMesh);
+                var bakedVerts = bakedMesh.vertices;
+                Object.DestroyImmediate(bakedMesh);
+
+                state.boneDisplacement = new Vector3[state.originalVertices.Length];
+                bool hasDisplacement = false;
+                for (int i = 0; i < state.originalVertices.Length; i++)
+                {
+                    state.boneDisplacement[i] = bakedVerts[i] - state.originalVertices[i];
+                    if (state.boneDisplacement[i].sqrMagnitude > 0.000001f)
+                        hasDisplacement = true;
+                }
+                // ボーン変位がない場合は null にして後続の処理をスキップ可能にする
+                if (!hasDisplacement)
+                    state.boneDisplacement = null;
+
+                // プレビュー初期メッシュにもボーン変位を反映
+                if (state.boneDisplacement != null)
+                {
+                    state.previewMesh.vertices = bakedVerts;
+                    state.previewMesh.RecalculateBounds();
+                }
+
                 piercingSmr.enabled = false;
 
                 var tempMf = setup.gameObject.AddComponent<MeshFilter>();
@@ -437,7 +464,12 @@ namespace PiercingTool.Editor
 
             var vertices = new Vector3[state.originalVertices.Length];
             for (int i = 0; i < vertices.Length; i++)
-                vertices[i] = rotation * (state.originalVertices[i] - savedCentroid) + currentCentroid;
+            {
+                var v = state.originalVertices[i];
+                if (state.boneDisplacement != null)
+                    v += state.boneDisplacement[i];
+                vertices[i] = rotation * (v - savedCentroid) + currentCentroid;
+            }
 
             state.previewMesh.vertices = vertices;
             state.previewMesh.RecalculateBounds();
@@ -493,7 +525,10 @@ namespace PiercingTool.Editor
                     {
                         if (vi < piercingVertices.Length)
                         {
-                            sum += piercingVertices[vi];
+                            var pos = piercingVertices[vi];
+                            if (state.boneDisplacement != null)
+                                pos += state.boneDisplacement[vi];
+                            sum += pos;
                             count++;
                         }
                     }
@@ -512,8 +547,19 @@ namespace PiercingTool.Editor
                 }
             }
 
-            state.segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
-                state.originalVertices, state.anchorCentroids);
+            if (state.boneDisplacement != null)
+            {
+                var displaced = new Vector3[state.originalVertices.Length];
+                for (int i = 0; i < displaced.Length; i++)
+                    displaced[i] = state.originalVertices[i] + state.boneDisplacement[i];
+                state.segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
+                    displaced, state.anchorCentroids);
+            }
+            else
+            {
+                state.segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
+                    state.originalVertices, state.anchorCentroids);
+            }
         }
 
         private static void ApplySegmentPreview(
@@ -576,7 +622,10 @@ namespace PiercingTool.Editor
                 var trans = Vector3.Lerp(savedDeltas[a0].translation, savedDeltas[a1].translation, t);
                 var pivot = Vector3.Lerp(state.anchorCentroids[a0], state.anchorCentroids[a1], t);
 
-                var localPos = state.originalVertices[vi] - pivot;
+                var v = state.originalVertices[vi];
+                if (state.boneDisplacement != null)
+                    v += state.boneDisplacement[vi];
+                var localPos = v - pivot;
                 vertices[vi] = rot * localPos + pivot + trans;
             }
 

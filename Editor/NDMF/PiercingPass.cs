@@ -7,8 +7,16 @@ namespace PiercingTool.Editor
 {
     public class PiercingPass : Pass<PiercingPass>
     {
+        /// <summary>
+        /// 統合モード時にターゲットメッシュの複製済み状態を追跡する。
+        /// 同じターゲットに複数ピアスを統合する場合、最初の1回だけ複製する。
+        /// </summary>
+        private readonly HashSet<int> _clonedTargets = new HashSet<int>();
+
         protected override void Execute(BuildContext context)
         {
+            _clonedTargets.Clear();
+
             var setups = context.AvatarRootObject
                 .GetComponentsInChildren<PiercingSetup>(true);
 
@@ -56,12 +64,21 @@ namespace PiercingTool.Editor
                     Debug.LogError($"[PiercingTool] ピアス処理に失敗しました: {setup.gameObject.name}\n{e}");
                 }
 
-                Object.DestroyImmediate(setup);
+                // 統合モードでは ProcessSetupMerge が GameObject ごと削除済み
+                if (setup != null)
+                    Object.DestroyImmediate(setup);
             }
         }
 
         private void ProcessSetup(PiercingSetup setup)
         {
+            // 統合モード（skipBoneWeightTransfer との同時使用は非対応）
+            if (setup.mergeIntoTarget && !setup.skipBoneWeightTransfer)
+            {
+                ProcessSetupMerge(setup);
+                return;
+            }
+
             var mesh = MeshGenerator.Generate(setup);
 
             // MeshFilter+MeshRenderer → SkinnedMeshRenderer に変換
@@ -86,7 +103,24 @@ namespace PiercingTool.Editor
 
             smr.sharedMesh = mesh;
 
-            if (!setup.skipBoneWeightTransfer)
+            bool isHybridMode = setup.skipBoneWeightTransfer &&
+                                setup.fixedPiercingVertices.Count > 0;
+
+            if (isHybridMode)
+            {
+                // ハイブリッドモード: ターゲットボーン + ピアスボーンを統合
+                var targetBones = setup.targetRenderer.bones;
+                var piercingBones = smr.bones ?? new Transform[0];
+
+                var mergedBones = new Transform[targetBones.Length + piercingBones.Length];
+                System.Array.Copy(targetBones, 0, mergedBones, 0, targetBones.Length);
+                System.Array.Copy(piercingBones, 0, mergedBones, targetBones.Length,
+                    piercingBones.Length);
+
+                smr.bones = mergedBones;
+                smr.rootBone = setup.targetRenderer.rootBone;
+            }
+            else if (!setup.skipBoneWeightTransfer)
             {
                 smr.bones = setup.targetRenderer.bones;
                 smr.rootBone = setup.targetRenderer.rootBone;
@@ -99,6 +133,45 @@ namespace PiercingTool.Editor
 #if PIERCING_VRCSDK && PIERCING_MODULAR_AVATAR
             VisemeAnimatorGenerator.Setup(setup, mesh);
 #endif
+        }
+
+        /// <summary>
+        /// 統合モード: ピアスメッシュをターゲットメッシュに統合し、ピアス GameObject を削除する。
+        /// </summary>
+        private void ProcessSetupMerge(PiercingSetup setup)
+        {
+            var piercingMesh = MeshGenerator.Generate(setup);
+
+            // ピアスのマテリアルを取得
+            Material[] piercingMaterials;
+            var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+            if (piercingSmr != null)
+            {
+                piercingMaterials = piercingSmr.sharedMaterials;
+            }
+            else
+            {
+                var mr = setup.GetComponent<MeshRenderer>();
+                piercingMaterials = mr != null ? mr.sharedMaterials : new Material[0];
+            }
+
+            // ターゲットメッシュを初回のみ複製（同じターゲットへの複数統合に対応）
+            var targetSmr = setup.targetRenderer;
+            int targetId = targetSmr.GetInstanceID();
+            if (_clonedTargets.Add(targetId))
+            {
+                targetSmr.sharedMesh = Object.Instantiate(targetSmr.sharedMesh);
+                targetSmr.sharedMesh.name = targetSmr.sharedMesh.name.Replace("(Clone)", "_Merged");
+            }
+
+            // ピアスローカル → ターゲットローカルの変換行列
+            var piercingToTarget = targetSmr.transform.worldToLocalMatrix *
+                                   setup.transform.localToWorldMatrix;
+
+            MeshMerger.Merge(targetSmr, piercingMesh, piercingToTarget, piercingMaterials);
+
+            // ピアス GameObject を削除
+            Object.DestroyImmediate(setup.gameObject);
         }
 
 #if PIERCING_MODULAR_AVATAR

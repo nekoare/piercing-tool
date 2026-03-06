@@ -11,7 +11,9 @@ namespace PiercingTool.Editor
     {
         private SerializedProperty _mode;
         private SerializedProperty _targetRenderer;
+        private SerializedProperty _mergeIntoTarget;
         private SerializedProperty _skipBoneWeightTransfer;
+        private SerializedProperty _fixedPiercingRadius;
         private SerializedProperty _perVertexBoneWeights;
         private SerializedProperty _maintainOverallShape;
 
@@ -19,11 +21,12 @@ namespace PiercingTool.Editor
 
         private struct PickerTarget : System.IEquatable<PickerTarget>
         {
-            public enum Kind { None, Single, AnchorTarget, AnchorPiercing }
+            public enum Kind { None, Single, AnchorTarget, AnchorPiercing, FixedPiercing }
             public Kind kind;
             public int index;
 
             public static readonly PickerTarget Single = new PickerTarget { kind = Kind.Single };
+            public static readonly PickerTarget Fixed = new PickerTarget { kind = Kind.FixedPiercing };
             public static PickerTarget AnchorTarget(int i)
                 => new PickerTarget { kind = Kind.AnchorTarget, index = i };
             public static PickerTarget AnchorPiercing(int i)
@@ -42,10 +45,43 @@ namespace PiercingTool.Editor
         private PickerTarget _activePickerTarget;
 
         /// <summary>
-        /// Chain モードで「ピアス側も指定する」トグルの ON 状態を保持する。
+        /// Chain モードで「ピアス側の頂点」トグルの OFF 状態を保持する。
         /// piercingVertices が空でもトグルが戻らないようにするためのエディタ限定状態。
         /// </summary>
         private readonly HashSet<int> _showPiercingForAnchor = new HashSet<int>();
+        private int _anchorDeleteRequested = -1;
+        private static GUIStyle _darkBoxStyle;
+        private static Texture2D _borderTex;
+        private static GUIStyle DarkBoxStyle
+        {
+            get
+            {
+                if (_darkBoxStyle == null)
+                {
+                    _darkBoxStyle = new GUIStyle();
+                    _darkBoxStyle.padding = new RectOffset(6, 6, 4, 4);
+                    _darkBoxStyle.margin = new RectOffset(2, 2, 2, 2);
+                    var bgTex = new Texture2D(1, 1);
+                    bgTex.SetPixel(0, 0, new Color(0f, 0f, 0f, 0.15f));
+                    bgTex.Apply();
+                    _darkBoxStyle.normal.background = bgTex;
+                }
+                return _darkBoxStyle;
+            }
+        }
+        private static Texture2D BorderTex
+        {
+            get
+            {
+                if (_borderTex == null)
+                {
+                    _borderTex = new Texture2D(1, 1);
+                    _borderTex.SetPixel(0, 0, new Color(0.5f, 0.5f, 0.5f, 0.5f));
+                    _borderTex.Apply();
+                }
+                return _borderTex;
+            }
+        }
 
         /// <summary>
         /// Single モードで referenceVertices が空のとき、現在の位置から自動検出した頂点。
@@ -57,7 +93,9 @@ namespace PiercingTool.Editor
         {
             _mode = serializedObject.FindProperty("mode");
             _targetRenderer = serializedObject.FindProperty("targetRenderer");
+            _mergeIntoTarget = serializedObject.FindProperty("mergeIntoTarget");
             _skipBoneWeightTransfer = serializedObject.FindProperty("skipBoneWeightTransfer");
+            _fixedPiercingRadius = serializedObject.FindProperty("fixedPiercingRadius");
             _perVertexBoneWeights = serializedObject.FindProperty("perVertexBoneWeights");
             _maintainOverallShape = serializedObject.FindProperty("maintainOverallShape");
             SceneView.duringSceneGui += DrawSceneVisualization;
@@ -76,11 +114,12 @@ namespace PiercingTool.Editor
             var setup = (PiercingSetup)target;
 
             // --- モード ---
-            EditorGUILayout.PropertyField(_mode, new GUIContent("モード"));
+            EditorGUILayout.PropertyField(_mode, new GUIContent("追従モード"));
             EditorGUILayout.Space();
 
             // --- Target Renderer ---
-            EditorGUILayout.PropertyField(_targetRenderer, new GUIContent("対象Renderer"));
+            EditorGUILayout.PropertyField(_targetRenderer, new GUIContent("対象Renderer",
+                "顔など，追従させたい対象のGameObjectを割り当ててください"));
             EditorGUILayout.Space();
 
             // --- 自動検出キャッシュ更新（Single + 未保存 + 手動選択なし） ---
@@ -104,25 +143,34 @@ namespace PiercingTool.Editor
             }
 
             // --- 頂点選択（保存中は読み取り専用） ---
+            bool isHybridMode = setup.skipBoneWeightTransfer &&
+                                setup.fixedPiercingVertices.Count > 0;
             if (setup.mode == PiercingMode.Single)
             {
-                DrawVertexSection("参照頂点", setup.referenceVertices, PickerTarget.Single, setup);
-                EditorGUILayout.Space();
-                EditorGUI.BeginChangeCheck();
-                EditorGUILayout.PropertyField(_perVertexBoneWeights,
-                    new GUIContent("体表面に追従",
-                        "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
-                        "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
-                if (EditorGUI.EndChangeCheck() && _perVertexBoneWeights.boolValue)
-                    _maintainOverallShape.boolValue = false;
+                // ハイブリッドモードでは参照頂点は自動検出されるため非表示
+                if (!isHybridMode)
+                {
+                    DrawVertexSection("参照頂点", setup.referenceVertices, PickerTarget.Single, setup);
+                    EditorGUILayout.Space();
+                    EditorGUI.BeginChangeCheck();
+                    EditorGUILayout.PropertyField(_perVertexBoneWeights,
+                        new GUIContent("体表面に追従",
+                            "ピアスの各頂点に最寄りの体メッシュのボーンウェイトを個別適用します。\n" +
+                            "体勢による位置ずれや埋まりを軽減しますが、ピアスが多少変形します。"));
+                    if (EditorGUI.EndChangeCheck() && _perVertexBoneWeights.boolValue)
+                        _maintainOverallShape.boolValue = false;
 
-                EditorGUI.BeginChangeCheck();
-                EditorGUILayout.PropertyField(_maintainOverallShape,
-                    new GUIContent("全体の形状を維持する",
-                        "ピアス位置に最も近い2頂点を自動選択し、軸方向の回転のみで追従します。\n" +
-                        "ピアスの形状変化を抑えたい場合に有効です。"));
-                if (EditorGUI.EndChangeCheck() && _maintainOverallShape.boolValue)
-                    _perVertexBoneWeights.boolValue = false;
+                    EditorGUI.BeginChangeCheck();
+                    EditorGUILayout.PropertyField(_maintainOverallShape,
+                        new GUIContent("全体の形状を維持する",
+                            "ピアス位置に最も近い2頂点を自動選択し、軸方向の回転のみで追従します。\n" +
+                            "ピアスの形状変化を抑えたい場合に有効です。"));
+                    if (EditorGUI.EndChangeCheck() && _maintainOverallShape.boolValue)
+                        _perVertexBoneWeights.boolValue = false;
+                }
+
+                EditorGUILayout.Space();
+                DrawMergeAndSkipOptions();
             }
             else if (setup.mode == PiercingMode.Chain)
             {
@@ -135,9 +183,7 @@ namespace PiercingTool.Editor
                 }
 
                 EditorGUILayout.Space();
-                EditorGUILayout.PropertyField(_skipBoneWeightTransfer,
-                    new GUIContent("ボーンウェイト転写をスキップ",
-                        "PhysBone設定済みの場合にチェック"));
+                DrawMergeAndSkipOptions();
             }
             else if (setup.mode == PiercingMode.MultiAnchor)
             {
@@ -254,7 +300,7 @@ namespace PiercingTool.Editor
                                                   _pickerTool.isActive &&
                                                   _activePickerTarget == pickerTarget;
 
-                        string buttonText = isThisPickerActive ? "選択中..." : "頂点を選択";
+                        string buttonText = isThisPickerActive ? "選択中..." : "頂点を手動で選択";
                         var buttonStyle = isThisPickerActive
                             ? new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold }
                             : GUI.skin.button;
@@ -328,35 +374,39 @@ namespace PiercingTool.Editor
         }
 
         private void DrawAnchorSection(string label, int anchorIndex, PiercingSetup setup,
-            bool showLabel = true)
+            bool showLabel = true, bool showDeleteButton = false, bool canDelete = false)
         {
             var anchor = setup.anchors[anchorIndex];
 
-            if (showLabel)
-                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
-            using (new EditorGUI.IndentLevelScope())
+            var scope = new EditorGUILayout.VerticalScope(DarkBoxStyle);
+            using (scope)
             {
-                // Target 頂点
-                DrawVertexListForAnchor(
-                    "Target頂点", anchor.targetVertices,
-                    PickerTarget.AnchorTarget(anchorIndex), setup,
-                    setup.targetRenderer);
+            if (showLabel && showDeleteButton)
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+                    using (new EditorGUI.DisabledScope(setup.isPositionSaved || !canDelete))
+                    {
+                        if (GUILayout.Button("\u00d7", GUILayout.Width(22)))
+                            _anchorDeleteRequested = anchorIndex;
+                    }
+                }
+            }
+            else if (showLabel)
+                EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
 
-                // ピアス側指定（Chain モードではオプション）
+            // ピアス側指定（Chain モードではオプション、デフォルト表示）
                 if (setup.mode == PiercingMode.Chain)
                 {
                     bool showPiercing = anchor.piercingVertices.Count > 0 ||
-                                        _showPiercingForAnchor.Contains(anchorIndex);
+                                        !_showPiercingForAnchor.Contains(anchorIndex);
                     bool newShowPiercing = EditorGUILayout.Toggle(
-                        "ピアス側も指定する", showPiercing);
+                        "ピアス側の頂点", showPiercing);
 
-                    if (newShowPiercing && !showPiercing)
+                    if (!newShowPiercing && showPiercing)
                     {
                         _showPiercingForAnchor.Add(anchorIndex);
-                    }
-                    else if (!newShowPiercing && showPiercing)
-                    {
-                        _showPiercingForAnchor.Remove(anchorIndex);
                         if (anchor.piercingVertices.Count > 0)
                         {
                             Undo.RecordObject(setup, "Clear piercing vertices");
@@ -364,11 +414,15 @@ namespace PiercingTool.Editor
                             EditorUtility.SetDirty(setup);
                         }
                     }
+                    else if (newShowPiercing && !showPiercing)
+                    {
+                        _showPiercingForAnchor.Remove(anchorIndex);
+                    }
 
                     if (newShowPiercing || anchor.piercingVertices.Count > 0)
                     {
                         DrawVertexListForAnchor(
-                            "Piercing頂点", anchor.piercingVertices,
+                            "対象頂点", anchor.piercingVertices,
                             PickerTarget.AnchorPiercing(anchorIndex), setup,
                             null, usePiercingMesh: true);
                     }
@@ -376,10 +430,25 @@ namespace PiercingTool.Editor
                 else // MultiAnchor — piercing 必須
                 {
                     DrawVertexListForAnchor(
-                        "Piercing頂点", anchor.piercingVertices,
+                        "対象頂点", anchor.piercingVertices,
                         PickerTarget.AnchorPiercing(anchorIndex), setup,
                         null, usePiercingMesh: true);
                 }
+
+                // 参照頂点（つける対象の頂点）
+                DrawVertexListForAnchor(
+                    "参照頂点(つける対象の頂点)", anchor.targetVertices,
+                    PickerTarget.AnchorTarget(anchorIndex), setup,
+                    setup.targetRenderer);
+            }
+            // 枠線を描画
+            if (Event.current.type == EventType.Repaint)
+            {
+                var r = scope.rect;
+                GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1), BorderTex);
+                GUI.DrawTexture(new Rect(r.x, r.yMax - 1, r.width, 1), BorderTex);
+                GUI.DrawTexture(new Rect(r.x, r.y, 1, r.height), BorderTex);
+                GUI.DrawTexture(new Rect(r.xMax - 1, r.y, 1, r.height), BorderTex);
             }
         }
 
@@ -389,7 +458,10 @@ namespace PiercingTool.Editor
             SkinnedMeshRenderer renderer,
             bool usePiercingMesh = false)
         {
-            EditorGUILayout.LabelField($"{label}: {vertices.Count}個");
+            if (pickerTarget.kind == PickerTarget.Kind.FixedPiercing)
+                EditorGUILayout.LabelField(label);
+            else
+                EditorGUILayout.LabelField($"{label}: {vertices.Count}個");
 
             // 頂点リスト表示
             if (vertices.Count > 0)
@@ -445,7 +517,9 @@ namespace PiercingTool.Editor
                     bool isActive = _pickerTool != null &&
                                     _pickerTool.isActive &&
                                     _activePickerTarget == pickerTarget;
-                    string btnText = isActive ? "選択中..." : "選択";
+                    bool isTargetPicker = pickerTarget.kind == PickerTarget.Kind.AnchorTarget;
+                    string btnLabel = isTargetPicker ? "手動で再選択" : "選択";
+                    string btnText = isActive ? "選択中..." : btnLabel;
                     var btnStyle = isActive
                         ? new GUIStyle(GUI.skin.button) { fontStyle = FontStyle.Bold }
                         : GUI.skin.button;
@@ -462,6 +536,14 @@ namespace PiercingTool.Editor
                     {
                         Undo.RecordObject(setup, "Clear vertices");
                         vertices.Clear();
+
+                        // 対象頂点クリア時は対応アンカーの参照頂点もクリア
+                        if (pickerTarget.kind == PickerTarget.Kind.AnchorPiercing)
+                        {
+                            var anchor = setup.anchors[pickerTarget.index];
+                            anchor.targetVertices.Clear();
+                        }
+
                         EditorUtility.SetDirty(setup);
                     }
                 }
@@ -478,7 +560,8 @@ namespace PiercingTool.Editor
             _pickerTool = new VertexPickerTool
             {
                 selectedVertices = vertices,
-                singleSelectMode = usePiercingMesh,
+                singleSelectMode = usePiercingMesh &&
+                    pickerTarget.kind == PickerTarget.Kind.AnchorPiercing,
                 onSelectionChanged = () =>
                 {
                     Undo.RecordObject(setup, "Select vertex");
@@ -490,6 +573,14 @@ namespace PiercingTool.Editor
                     {
                         int anchorIdx = pickerTarget.index;
                         AutoDetectTargetForAnchor(setup, anchorIdx);
+                    }
+
+                    // 1点選択モードでは選択後に自動解除（AnchorPiercing のみ）
+                    if (usePiercingMesh &&
+                        pickerTarget.kind == PickerTarget.Kind.AnchorPiercing &&
+                        vertices.Count >= 1)
+                    {
+                        _pickerTool?.Deactivate();
                     }
 
                     Repaint();
@@ -541,25 +632,19 @@ namespace PiercingTool.Editor
         {
             for (int i = 0; i < setup.anchors.Count; i++)
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    EditorGUILayout.LabelField($"Anchor {i + 1}", EditorStyles.boldLabel);
+                DrawAnchorSection($"Anchor {i + 1}", i, setup, showLabel: true,
+                    showDeleteButton: true, canDelete: setup.anchors.Count > 2);
 
-                    // 削除ボタン（2個未満にはできない）
-                    using (new EditorGUI.DisabledScope(
-                        setup.isPositionSaved || setup.anchors.Count <= 2))
-                    {
-                        if (GUILayout.Button("\u00d7", GUILayout.Width(22)))
-                        {
-                            Undo.RecordObject(setup, "Remove anchor");
-                            setup.anchors.RemoveAt(i);
-                            EditorUtility.SetDirty(setup);
-                            break;
-                        }
-                    }
+                // 削除が要求された場合
+                if (_anchorDeleteRequested == i)
+                {
+                    _anchorDeleteRequested = -1;
+                    Undo.RecordObject(setup, "Remove anchor");
+                    setup.anchors.RemoveAt(i);
+                    EditorUtility.SetDirty(setup);
+                    break;
                 }
 
-                DrawAnchorSection($"Anchor {i + 1}", i, setup, showLabel: false);
                 EditorGUILayout.Space();
             }
 
@@ -575,9 +660,57 @@ namespace PiercingTool.Editor
             }
 
             EditorGUILayout.Space();
-            EditorGUILayout.PropertyField(_skipBoneWeightTransfer,
-                new GUIContent("ボーンウェイト転写をスキップ",
-                    "PhysBone設定済みの場合にチェック"));
+            DrawMergeAndSkipOptions();
+        }
+
+        private void DrawMergeAndSkipOptions()
+        {
+            EditorGUI.BeginChangeCheck();
+            using (new EditorGUI.DisabledScope(_skipBoneWeightTransfer.boolValue))
+            {
+                EditorGUILayout.PropertyField(_mergeIntoTarget,
+                    new GUIContent("lipsync・MMD用設定(メッシュを統合)",
+                        "リップシンクの精度向上・MMDワールドでの口追従に有効\nPhysBoneが含まれるピアスには推奨されません"));
+            }
+            if (EditorGUI.EndChangeCheck() && _mergeIntoTarget.boolValue)
+                _skipBoneWeightTransfer.boolValue = false;
+
+            EditorGUI.BeginChangeCheck();
+            using (new EditorGUI.DisabledScope(_mergeIntoTarget.boolValue))
+            {
+                EditorGUILayout.PropertyField(_skipBoneWeightTransfer,
+                    new GUIContent("ボーンウェイト転写をスキップ(PhysBoneで揺らす場合はチェックを入れてください。)",
+                        "PhysBone設定済みの場合にチェック"));
+            }
+            if (EditorGUI.EndChangeCheck() && _skipBoneWeightTransfer.boolValue)
+                _mergeIntoTarget.boolValue = false;
+
+            // ハイブリッドモード: skipBoneWeightTransfer ON + SMR ありの場合に固定範囲ピッカーを表示
+            if (_skipBoneWeightTransfer.boolValue)
+            {
+                var setup = (PiercingSetup)target;
+                var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (piercingSmr != null && piercingSmr.sharedMesh != null)
+                {
+                    EditorGUILayout.Space(4);
+                    DrawVertexListForAnchor(
+                        "追従させる範囲を指定", setup.fixedPiercingVertices,
+                        PickerTarget.Fixed, setup,
+                        setup.targetRenderer,
+                        usePiercingMesh: true);
+
+                    if (setup.fixedPiercingVertices.Count > 0)
+                    {
+                        EditorGUILayout.Slider(_fixedPiercingRadius, 0.001f, 0.1f,
+                            new GUIContent("固定範囲の半径",
+                                "中心頂点からこの半径内の頂点が顔メッシュに追従します"));
+
+                        EditorGUILayout.HelpBox(
+                            "範囲内の頂点は対象RendererのBlendShapeに追従します。範囲外の頂点はBone構造が維持されます。\n表情などに沿って動かしたい部分のみ球内に納めてください。",
+                            MessageType.Info);
+                    }
+                }
+            }
         }
 
         private bool IsReadyToGenerate(PiercingSetup setup)

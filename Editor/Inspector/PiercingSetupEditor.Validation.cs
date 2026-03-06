@@ -46,6 +46,31 @@ namespace PiercingTool.Editor
                 }
             }
 
+            // メッシュ統合のガイダンス
+            if (setup.mergeIntoTarget)
+            {
+                EditorGUILayout.HelpBox(
+                    "ピアスメッシュがターゲットに統合されます。\n" +
+                    "リップシンク・MMDワールドでの口の追従が改善されます。",
+                    MessageType.Info);
+            }
+
+            // ボーンウェイト転写のガイダンス
+            if (setup.skipBoneWeightTransfer)
+            {
+                EditorGUILayout.HelpBox(
+                    "ボーンウェイト転写をスキップしているため、ピアスのボーン構造は維持されます。\n" +
+                    "アバターの部位に追従させるには MA Merge Armature または MA Bone Proxy を設定してください。",
+                    MessageType.Info);
+            }
+            else if (!setup.mergeIntoTarget)
+            {
+                EditorGUILayout.HelpBox(
+                    "PhysBoneによる揺れものがある場合は「ボーンウェイト転写をスキップ」をONにし、\n" +
+                    "MA Merge Armature または MA Bone Proxy を設定してください。",
+                    MessageType.Info);
+            }
+
             // 頂点品質チェック
             if (setup.targetRenderer != null && setup.targetRenderer.sharedMesh != null)
             {
@@ -101,5 +126,6 @@ namespace PiercingTool.Editor
                     return string.Empty;
             }
         }
+
     }
 }

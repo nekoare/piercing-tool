@@ -13,7 +13,7 @@ namespace PiercingTool
         public List<int> piercingVertices = new List<int>();
     }
 
-    [AddComponentMenu("Piercing Tool/Piercing Setup")]
+    [AddComponentMenu("VRCぴあっさ～")]
     [DisallowMultipleComponent]
     public class PiercingSetup : MonoBehaviour
 #if PIERCING_VRCSDK
@@ -58,8 +58,17 @@ namespace PiercingTool
         // --- Chain / MultiAnchor 共通 ---
         public List<AnchorPair> anchors = new List<AnchorPair>();
 
+        [Tooltip("lipsync・MMD用設定(メッシュを統合)\nPhysBoneが含まれるピアスには推奨されません")]
+        public bool mergeIntoTarget;
+
         [Tooltip("PhysBone設定済みの場合、ボーンウェイト転写をスキップ")]
         public bool skipBoneWeightTransfer;
+
+        [Tooltip("顔メッシュに追従させる固定範囲の中心頂点（skipBoneWeightTransfer時のハイブリッドモード用）")]
+        public List<int> fixedPiercingVertices = new List<int>();
+
+        [Tooltip("固定頂点の範囲半径")]
+        public float fixedPiercingRadius = 0.01f;
 
         [Tooltip("ピアスの各頂点に最寄りの体メッシュ頂点のボーンウェイトを個別適用する")]
         public bool perVertexBoneWeights;

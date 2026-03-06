@@ -837,7 +837,7 @@ namespace PiercingTool.Editor
         /// <summary>
         /// 参照頂点のボーンウェイトを指定の重みで加重平均する（バリセントリック補間用）。
         /// </summary>
-        private static Dictionary<int, float> ComputeWeightedBoneWeights(
+        internal static Dictionary<int, float> ComputeWeightedBoneWeights(
             Mesh mesh, int[] indices, float[] vertexWeights)
         {
             var sourceWeights = mesh.GetAllBoneWeights();
@@ -865,7 +865,7 @@ namespace PiercingTool.Editor
             return weightMap;
         }
 
-        private static Dictionary<int, float> ComputeAverageBoneWeights(Mesh mesh, int[] indices)
+        internal static Dictionary<int, float> ComputeAverageBoneWeights(Mesh mesh, int[] indices)
         {
             var sourceWeights = mesh.GetAllBoneWeights();
             var sourceBonesPerVertex = mesh.GetBonesPerVertex();
@@ -927,7 +927,7 @@ namespace PiercingTool.Editor
             return new Vector3(u / sum, v / sum, w / sum);
         }
 
-        private static List<BoneWeight1> NormalizeAndSort(Dictionary<int, float> weightMap)
+        internal static List<BoneWeight1> NormalizeAndSort(Dictionary<int, float> weightMap)
         {
             float totalWeight = 0;
             var result = new List<BoneWeight1>();

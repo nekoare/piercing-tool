@@ -1,0 +1,32 @@
+name: Build VPM Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Verify version match
+        run: |
+          PKG_VERSION=$(jq -r '.version' package.json)
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json ($PKG_VERSION) != tag ($TAG_VERSION)"
+            exit 1
+          fi
+      - name: Create zip
+        run: |
+          NAME=$(jq -r '.name' package.json)
+          zip -r "${NAME}-${{ steps.version.outputs.version }}.zip" . \
+            -x '.git/*' '.github/*'
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          generate_release_notes: true
