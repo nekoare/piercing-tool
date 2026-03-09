@@ -26,7 +26,16 @@ namespace PiercingTool.Editor
             int nTotal = nTarget + nPiercing;
 
             var normalMatrix = ComputeNormalMatrix(piercingToTarget);
-            bool flipWinding = piercingToTarget.determinant < 0;
+
+            // bindpose（mesh.Clear() で消えるため事前にコピー）
+            var targetBindposes = targetMesh.bindposes;
+
+            // ワインディング反転判定:
+            // 描画時の変換チェーン bone.ltw × bindpose × piercingToTarget の determinant が
+            // 負の場合、三角形の裏表が反転する。piercingToTarget の反転だけでなく、
+            // 元の bindpose のスキニングによる反転（FBX座標系変換由来など）も考慮する。
+            bool skinningFlip = targetBindposes.Length > 0 && targetBindposes[0].determinant < 0;
+            bool flipWinding = (piercingToTarget.determinant < 0) != skinningFlip;
 
             // ==============================================================
             // 1. 全データを先に読み取る（mesh.vertices 変更で他属性がクリアされるため）
@@ -211,10 +220,8 @@ namespace PiercingTool.Editor
                 for (int i = 0; i < piercingWeightsData.Length; i++)
                     mergedWeights[targetWeightsData.Length + i] = piercingWeightsData[i];
 
-                // bindpose はターゲットのボーンから再計算
-                targetMesh.bindposes = targetSmr.bones.Length > 0
-                    ? ComputeTargetBindposes(targetSmr)
-                    : new Matrix4x4[0];
+                // bindpose は元のターゲットメッシュから復元（再計算するとレスト位置のずれで顔メッシュが移動する）
+                targetMesh.bindposes = targetBindposes;
 
                 var bpvNative = new NativeArray<byte>(mergedBpv, Allocator.Temp);
                 var weightsNative = new NativeArray<BoneWeight1>(mergedWeights, Allocator.Temp);

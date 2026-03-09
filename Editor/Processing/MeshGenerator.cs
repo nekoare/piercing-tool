@@ -82,7 +82,9 @@ namespace PiercingTool.Editor
             // SkinnedMeshRendererでは自動補正されないため、
             // メッシュデータのワインディングを手動で反転して面カリングを正しくする。
             // 法線・タンジェントは inverse-transpose で正しく変換されるため変更不要。
-            if (setup.transform.localToWorldMatrix.determinant < 0)
+            // 統合モードでは MeshMerger が piercingToTarget + bindpose を考慮して
+            // 一括で判定するため、ここでは反転しない（二重反転防止）。
+            if (!setup.mergeIntoTarget && setup.transform.localToWorldMatrix.determinant < 0)
                 FlipTriangleWinding(piercingMesh);
 
             // BlendShape転写
