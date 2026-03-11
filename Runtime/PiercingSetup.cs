@@ -75,5 +75,8 @@ namespace PiercingTool
 
         [Tooltip("最寄りの2頂点を参照点にして軸回転のみで追従し、ピアスの全体的な形状を維持する")]
         public bool maintainOverallShape;
+
+        [Tooltip("舌ピが浮く場合の調整設定")]
+        public bool surfaceAttachment;
     }
 }

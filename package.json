@@ -1,6 +1,6 @@
 {
   "name": "com.nekoare.piercing-tool",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "なんでもどこでもピアスにするやつ",
   "description": "シェイプキーで変形する部位にピアスメッシュを追従させるツール",
   "unity": "2022.3",

@@ -317,7 +317,12 @@ namespace PiercingTool.Editor
             }
 
             if (setup.mode == PiercingMode.Single)
-                ApplyRigidPreview(setup, sourceMesh, state);
+            {
+                if (setup.surfaceAttachment && setup.referenceVertices.Count == 3)
+                    ApplySurfacePreview(setup, sourceMesh, state);
+                else
+                    ApplyRigidPreview(setup, sourceMesh, state);
+            }
             else
                 ApplySegmentPreview(setup, sourceMesh, state);
 
@@ -469,6 +474,81 @@ namespace PiercingTool.Editor
                 if (state.boneDisplacement != null)
                     v += state.boneDisplacement[i];
                 vertices[i] = rotation * (v - savedCentroid) + currentCentroid;
+            }
+
+            state.previewMesh.vertices = vertices;
+            state.previewMesh.RecalculateBounds();
+        }
+
+        /// <summary>
+        /// 表面アタッチメント方式のプレビュー。
+        /// バリセントリック座標＋法線オフセットでアタッチメントポイントを計算し、
+        /// 表面追従する並進を適用する。
+        /// </summary>
+        private static void ApplySurfacePreview(PiercingSetup setup, Mesh sourceMesh, PreviewState state)
+        {
+            var renderer = setup.targetRenderer;
+            var refIndicesArr = setup.referenceVertices.ToArray();
+
+            var sourceToPiercing = setup.transform.worldToLocalMatrix *
+                                   renderer.transform.localToWorldMatrix;
+
+            var savedRefPosSrc = MeshGenerator.ComputeDeformedRefPositions(
+                renderer, sourceMesh, refIndicesArr, setup.savedBlendShapeWeights);
+            var currentRefPosSrc = MeshGenerator.ComputeDeformedRefPositions(
+                renderer, sourceMesh, refIndicesArr, null);
+
+            var savedPiercing = new Vector3[3];
+            var currentPiercing = new Vector3[3];
+            for (int i = 0; i < 3; i++)
+            {
+                savedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(savedRefPosSrc[i]);
+                currentPiercing[i] = sourceToPiercing.MultiplyPoint3x4(currentRefPosSrc[i]);
+            }
+
+            // ピアス重心からバリセントリック座標と法線オフセットを計算
+            var piercingCentroid = Vector3.zero;
+            for (int i = 0; i < state.originalVertices.Length; i++)
+            {
+                var v = state.originalVertices[i];
+                if (state.boneDisplacement != null)
+                    v += state.boneDisplacement[i];
+                piercingCentroid += v;
+            }
+            piercingCentroid /= state.originalVertices.Length;
+
+            var bary = BlendShapeTransferEngine.ComputeBarycentricCoords(
+                piercingCentroid,
+                savedPiercing[0], savedPiercing[1], savedPiercing[2]);
+
+            var savedSurface = bary.x * savedPiercing[0] + bary.y * savedPiercing[1] + bary.z * savedPiercing[2];
+            var savedNormal = Vector3.Cross(
+                savedPiercing[1] - savedPiercing[0], savedPiercing[2] - savedPiercing[0]);
+            if (savedNormal.sqrMagnitude < 1e-12f) savedNormal = Vector3.up;
+            else savedNormal.Normalize();
+            float normalOffset = Vector3.Dot(piercingCentroid - savedSurface, savedNormal);
+            var savedAttach = savedSurface + normalOffset * savedNormal;
+
+            // 現在のアタッチメントポイント
+            var currentSurface = bary.x * currentPiercing[0] + bary.y * currentPiercing[1] + bary.z * currentPiercing[2];
+            var currentNormal = Vector3.Cross(
+                currentPiercing[1] - currentPiercing[0], currentPiercing[2] - currentPiercing[0]);
+            if (currentNormal.sqrMagnitude < 1e-12f) currentNormal = savedNormal;
+            else currentNormal.Normalize();
+            var currentAttach = currentSurface + normalOffset * currentNormal;
+
+            // 三角面フレーム回転
+            var rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                savedPiercing[0], savedPiercing[1], savedPiercing[2],
+                currentPiercing[0], currentPiercing[1], currentPiercing[2]);
+
+            var vertices = new Vector3[state.originalVertices.Length];
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                var v = state.originalVertices[i];
+                if (state.boneDisplacement != null)
+                    v += state.boneDisplacement[i];
+                vertices[i] = rotation * (v - savedAttach) + currentAttach;
             }
 
             state.previewMesh.vertices = vertices;

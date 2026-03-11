@@ -123,15 +123,54 @@ namespace PiercingTool.Editor
 
                 // 配置時にBlendShapeが有効な場合、ピアス頂点をBASE状態に補正
                 // ハイブリッドモードではPhysBone頂点を除外（bindposeとの整合を保つ）
-                CorrectPiercingToBasePosition(
-                    setup.targetRenderer, sourceMesh, piercingMesh,
-                    refIndicesArr, sourceToPiercing,
-                    setup.savedBlendShapeWeights,
-                    isHybridMode ? new HashSet<int>(expandedFixedVertices) : null);
+                if (setup.surfaceAttachment && refIndicesArr.Length == 3)
+                {
+                    // 表面アタッチメント方式: バリセントリック座標と法線オフセットを計算
+                    var deformedRefPosSrc = ComputeDeformedRefPositions(
+                        setup.targetRenderer, sourceMesh, refIndicesArr, setup.savedBlendShapeWeights);
 
-                transferred = BlendShapeTransferEngine.TransferBlendShapesSingle(
-                    sourceMesh, piercingMesh,
-                    refIndicesArr, sourceToPiercing);
+                    var deformedPiercing = new Vector3[3];
+                    for (int i = 0; i < 3; i++)
+                        deformedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(deformedRefPosSrc[i]);
+
+                    var piercingCentroid = BlendShapeTransferEngine.ComputeCentroid(piercingMesh.vertices);
+                    var bary = BlendShapeTransferEngine.ComputeBarycentricCoords(
+                        piercingCentroid,
+                        deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                    var surfacePoint = bary.x * deformedPiercing[0] +
+                                       bary.y * deformedPiercing[1] +
+                                       bary.z * deformedPiercing[2];
+                    var normal = Vector3.Cross(
+                        deformedPiercing[1] - deformedPiercing[0],
+                        deformedPiercing[2] - deformedPiercing[0]);
+                    if (normal.sqrMagnitude < 1e-12f)
+                        normal = Vector3.up;
+                    else
+                        normal.Normalize();
+                    float normalOffset = Vector3.Dot(piercingCentroid - surfacePoint, normal);
+
+                    CorrectPiercingToBasePositionSurface(
+                        setup.targetRenderer, sourceMesh, piercingMesh,
+                        refIndicesArr, bary, normalOffset, sourceToPiercing,
+                        setup.savedBlendShapeWeights,
+                        isHybridMode ? new HashSet<int>(expandedFixedVertices) : null);
+
+                    transferred = BlendShapeTransferEngine.TransferBlendShapesSurface(
+                        sourceMesh, piercingMesh,
+                        refIndicesArr, bary, normalOffset, sourceToPiercing);
+                }
+                else
+                {
+                    CorrectPiercingToBasePosition(
+                        setup.targetRenderer, sourceMesh, piercingMesh,
+                        refIndicesArr, sourceToPiercing,
+                        setup.savedBlendShapeWeights,
+                        isHybridMode ? new HashSet<int>(expandedFixedVertices) : null);
+
+                    transferred = BlendShapeTransferEngine.TransferBlendShapesSingle(
+                        sourceMesh, piercingMesh,
+                        refIndicesArr, sourceToPiercing);
+                }
             }
             else // Chain / MultiAnchor
             {
@@ -625,6 +664,71 @@ namespace PiercingTool.Editor
             {
                 if (affectedVertices != null && !affectedVertices.Contains(i)) continue;
                 vertices[i] = invRotation * (vertices[i] - deformedCentroid) + baseCentroid;
+            }
+
+            piercingMesh.vertices = vertices;
+        }
+
+        /// <summary>
+        /// 表面アタッチメント方式のBASE補正。
+        /// 参照三角面上のバリセントリック座標＋法線オフセットで
+        /// アタッチメントポイントを計算し、その変位の逆変換を適用する。
+        /// </summary>
+        private static void CorrectPiercingToBasePositionSurface(
+            SkinnedMeshRenderer renderer, Mesh sourceMesh, Mesh piercingMesh,
+            int[] referenceIndices, Vector3 barycentricCoords, float normalOffset,
+            Matrix4x4 sourceToPiercing,
+            float[] overrideWeights = null,
+            HashSet<int> affectedVertices = null)
+        {
+            var baseRefPosSrc = BlendShapeTransferEngine.ExtractPositions(
+                sourceMesh.vertices, referenceIndices);
+            var deformedRefPosSrc = ComputeDeformedRefPositions(
+                renderer, sourceMesh, referenceIndices, overrideWeights);
+
+            var basePiercing = new Vector3[3];
+            var deformedPiercing = new Vector3[3];
+            for (int i = 0; i < 3; i++)
+            {
+                basePiercing[i] = sourceToPiercing.MultiplyPoint3x4(baseRefPosSrc[i]);
+                deformedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(deformedRefPosSrc[i]);
+            }
+
+            // 三角面フレーム回転
+            var rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                basePiercing[0], basePiercing[1], basePiercing[2],
+                deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+
+            // アタッチメントポイント（ピアス空間）
+            var bary = barycentricCoords;
+
+            var baseSurface = bary.x * basePiercing[0] + bary.y * basePiercing[1] + bary.z * basePiercing[2];
+            var baseNormal = Vector3.Cross(
+                basePiercing[1] - basePiercing[0], basePiercing[2] - basePiercing[0]);
+            if (baseNormal.sqrMagnitude < 1e-12f) baseNormal = Vector3.up;
+            else baseNormal.Normalize();
+            var baseAttach = baseSurface + normalOffset * baseNormal;
+
+            var deformedSurface = bary.x * deformedPiercing[0] + bary.y * deformedPiercing[1] + bary.z * deformedPiercing[2];
+            var deformedNormal = Vector3.Cross(
+                deformedPiercing[1] - deformedPiercing[0], deformedPiercing[2] - deformedPiercing[0]);
+            if (deformedNormal.sqrMagnitude < 1e-12f) deformedNormal = Vector3.up;
+            else deformedNormal.Normalize();
+            var deformedAttach = deformedSurface + normalOffset * deformedNormal;
+
+            // 有意な変形がなければ補正不要
+            float offsetMag = (deformedAttach - baseAttach).magnitude;
+            float rotAngle = Quaternion.Angle(rotation, Quaternion.identity);
+            if (offsetMag < 0.0001f && rotAngle < 0.01f)
+                return;
+
+            var invRotation = Quaternion.Inverse(rotation);
+            var vertices = piercingMesh.vertices;
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                if (affectedVertices != null && !affectedVertices.Contains(i)) continue;
+                vertices[i] = invRotation * (vertices[i] - deformedAttach) + baseAttach;
             }
 
             piercingMesh.vertices = vertices;

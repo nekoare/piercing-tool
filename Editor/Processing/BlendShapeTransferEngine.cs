@@ -293,6 +293,114 @@ namespace PiercingTool.Editor
         }
 
         // =====================================================================
+        // 表面アタッチメント BlendShape転写
+        // =====================================================================
+
+        /// <summary>
+        /// 表面アタッチメント方式: ピアス重心を対象メッシュ表面にバリセントリック座標で紐付け、
+        /// 三角面の接線フレームから回転を導出する。剛体変換の並進成分を表面追従で計算するため、
+        /// 舌の伸縮のような非剛体変形でもピアスが表面から浮いたり埋まったりしない。
+        /// </summary>
+        public static List<string> TransferBlendShapesSurface(
+            Mesh sourceMesh,
+            Mesh piercingMesh,
+            int[] triangleVertexIndices,
+            Vector3 barycentricCoords,
+            float normalOffset,
+            Matrix4x4 sourceToPiercingSpace,
+            float deltaThreshold = 0.0001f)
+        {
+            var transferredNames = new List<string>();
+
+            int sourceVertexCount = sourceMesh.vertexCount;
+            int piercingVertexCount = piercingMesh.vertexCount;
+            var piercingVertices = piercingMesh.vertices;
+            var sourceVertices = sourceMesh.vertices;
+
+            int idx0 = triangleVertexIndices[0];
+            int idx1 = triangleVertexIndices[1];
+            int idx2 = triangleVertexIndices[2];
+            var bary = barycentricCoords;
+
+            // ベース三角面をピアス空間に変換
+            var v0Base = sourceToPiercingSpace.MultiplyPoint3x4(sourceVertices[idx0]);
+            var v1Base = sourceToPiercingSpace.MultiplyPoint3x4(sourceVertices[idx1]);
+            var v2Base = sourceToPiercingSpace.MultiplyPoint3x4(sourceVertices[idx2]);
+
+            // ベースアタッチメントポイント（ピアス空間）
+            var baseSurface = bary.x * v0Base + bary.y * v1Base + bary.z * v2Base;
+            var baseNormal = Vector3.Cross(v1Base - v0Base, v2Base - v0Base);
+            if (baseNormal.sqrMagnitude < 1e-12f)
+                baseNormal = Vector3.up;
+            else
+                baseNormal.Normalize();
+            var attachBase = baseSurface + normalOffset * baseNormal;
+
+            int blendShapeCount = sourceMesh.blendShapeCount;
+            var srcDeltaVertices = new Vector3[sourceVertexCount];
+            var srcDeltaNormals = new Vector3[sourceVertexCount];
+            var srcDeltaTangents = new Vector3[sourceVertexCount];
+
+            for (int si = 0; si < blendShapeCount; si++)
+            {
+                string shapeName = sourceMesh.GetBlendShapeName(si);
+                int frameCount = sourceMesh.GetBlendShapeFrameCount(si);
+
+                sourceMesh.GetBlendShapeFrameVertices(si, frameCount - 1,
+                    srcDeltaVertices, srcDeltaNormals, srcDeltaTangents);
+
+                // 変形後三角面（ソース空間→ピアス空間）
+                var v0Def = sourceToPiercingSpace.MultiplyPoint3x4(
+                    sourceVertices[idx0] + srcDeltaVertices[idx0]);
+                var v1Def = sourceToPiercingSpace.MultiplyPoint3x4(
+                    sourceVertices[idx1] + srcDeltaVertices[idx1]);
+                var v2Def = sourceToPiercingSpace.MultiplyPoint3x4(
+                    sourceVertices[idx2] + srcDeltaVertices[idx2]);
+
+                // 変形後アタッチメントポイント
+                var defSurface = bary.x * v0Def + bary.y * v1Def + bary.z * v2Def;
+                var defNormal = Vector3.Cross(v1Def - v0Def, v2Def - v0Def);
+                if (defNormal.sqrMagnitude < 1e-12f)
+                    defNormal = baseNormal;
+                else
+                    defNormal.Normalize();
+                var attachDef = defSurface + normalOffset * defNormal;
+
+                // 三角面フレーム回転
+                var rotation = ComputeTriangleFrameRotation(
+                    v0Base, v1Base, v2Base,
+                    v0Def, v1Def, v2Def);
+
+                // 並進: アタッチメントポイントの変位
+                var translation = attachDef - attachBase;
+
+                // 閾値チェック
+                if (translation.magnitude < deltaThreshold &&
+                    Quaternion.Angle(rotation, Quaternion.identity) < 0.01f)
+                    continue;
+
+                // ピアスメッシュの全頂点に剛体変換を適用
+                var piercingDeltas = new Vector3[piercingVertexCount];
+                var piercingNormalDeltas = new Vector3[piercingVertexCount];
+                var piercingTangentDeltas = new Vector3[piercingVertexCount];
+
+                for (int vi = 0; vi < piercingVertexCount; vi++)
+                {
+                    var localPos = piercingVertices[vi] - attachBase;
+                    piercingDeltas[vi] = rotation * localPos - localPos + translation;
+                }
+
+                float frameWeight = sourceMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
+                piercingMesh.AddBlendShapeFrame(shapeName, frameWeight,
+                    piercingDeltas, piercingNormalDeltas, piercingTangentDeltas);
+
+                transferredNames.Add(shapeName);
+            }
+
+            return transferredNames;
+        }
+
+        // =====================================================================
         // Chain / MultiAnchor BlendShape転写
         // =====================================================================
 

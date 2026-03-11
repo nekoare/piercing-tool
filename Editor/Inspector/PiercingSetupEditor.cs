@@ -16,6 +16,7 @@ namespace PiercingTool.Editor
         private SerializedProperty _fixedPiercingRadius;
         private SerializedProperty _perVertexBoneWeights;
         private SerializedProperty _maintainOverallShape;
+        private SerializedProperty _surfaceAttachment;
 
         private VertexPickerTool _pickerTool;
 
@@ -98,6 +99,7 @@ namespace PiercingTool.Editor
             _fixedPiercingRadius = serializedObject.FindProperty("fixedPiercingRadius");
             _perVertexBoneWeights = serializedObject.FindProperty("perVertexBoneWeights");
             _maintainOverallShape = serializedObject.FindProperty("maintainOverallShape");
+            _surfaceAttachment = serializedObject.FindProperty("surfaceAttachment");
             SceneView.duringSceneGui += DrawSceneVisualization;
         }
 
@@ -166,7 +168,18 @@ namespace PiercingTool.Editor
                             "ピアス位置に最も近い2頂点を自動選択し、軸方向の回転のみで追従します。\n" +
                             "ピアスの形状変化を抑えたい場合に有効です。"));
                     if (EditorGUI.EndChangeCheck() && _maintainOverallShape.boolValue)
+                    {
                         _perVertexBoneWeights.boolValue = false;
+                        _surfaceAttachment.boolValue = false;
+                    }
+
+                    EditorGUI.BeginChangeCheck();
+                    EditorGUILayout.PropertyField(_surfaceAttachment,
+                        new GUIContent("舌ピが浮く場合の調整設定",
+                            "舌などの非剛体変形する部位でピアスが浮いたり埋まったりする場合に有効にしてください。\n" +
+                            "ピアスを対象メッシュ表面に紐付けて追従させます。"));
+                    if (EditorGUI.EndChangeCheck() && _surfaceAttachment.boolValue)
+                        _maintainOverallShape.boolValue = false;
                 }
 
                 EditorGUILayout.Space();
