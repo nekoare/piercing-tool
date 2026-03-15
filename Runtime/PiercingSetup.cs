@@ -13,6 +13,23 @@ namespace PiercingTool
         public List<int> piercingVertices = new List<int>();
     }
 
+    [System.Serializable]
+    public class PiercingGroup
+    {
+        public string name = "";
+        public List<int> vertexIndices = new List<int>();
+        public List<int> triangleIndices = new List<int>();
+        public PiercingMode mode = PiercingMode.Single;
+        public List<int> referenceVertices = new List<int>();
+        public bool surfaceAttachment;
+        public bool maintainOverallShape;
+        public List<AnchorPair> anchors = new List<AnchorPair>();
+
+        // 位置調整オフセット（ローカル座標系）
+        public Vector3 positionOffset;
+        public Vector3 rotationEuler;
+    }
+
     [AddComponentMenu("VRCぴあっさ～")]
     [DisallowMultipleComponent]
     public class PiercingSetup : MonoBehaviour
@@ -78,5 +95,16 @@ namespace PiercingTool
 
         [Tooltip("舌ピが浮く場合の調整設定")]
         public bool surfaceAttachment;
+
+        // --- 位置調整オフセット（ローカル座標系、非マルチモード用） ---
+        public Vector3 positionOffset;
+        public Vector3 rotationEuler;
+
+        // --- マルチグループモード ---
+        public bool useMultiGroup;
+        [HideInInspector]
+        public List<PiercingGroup> piercingGroups = new List<PiercingGroup>();
+        [HideInInspector]
+        public int selectedGroupIndex;
     }
 }

@@ -15,6 +15,9 @@ namespace PiercingTool.Editor
         /// </summary>
         public static Mesh Generate(PiercingSetup setup)
         {
+            if (setup.useMultiGroup && setup.piercingGroups.Count > 0)
+                return GenerateMultiGroup(setup);
+
             if (setup.targetRenderer == null)
                 throw new System.InvalidOperationException("対象Rendererが設定されていません。");
 
@@ -72,6 +75,9 @@ namespace PiercingTool.Editor
                 }
             }
 
+            // 位置調整オフセットを適用（ローカル座標系での剛体変換）
+            ApplyPositionOffset(piercingMesh, setup.positionOffset, setup.rotationEuler);
+
             // ソースメッシュ→ピアスメッシュの座標変換行列
             // 回転とスケールの違いを補正してBlendShapeデルタを正しく変換する
             var sourceToPiercing = setup.transform.worldToLocalMatrix *
@@ -109,14 +115,15 @@ namespace PiercingTool.Editor
                 if (setup.maintainOverallShape && refIndicesArr.Length == 0)
                 {
                     // 「全体の形状を維持する」（参照頂点未保存時のフォールバック）
-                    refIndicesArr = FindClosestTwoVertices(
-                        setup.targetRenderer, piercingWorldPos);
+                    // 保存時のBlendShape状態で検出（ビルド時の状態と保存時の状態が異なる場合に対応）
+                    refIndicesArr = FindClosestTwoVerticesAtState(
+                        setup.targetRenderer, piercingWorldPos, setup.savedBlendShapeWeights);
                 }
                 else if (refIndicesArr.Length == 0)
                 {
                     // 参照頂点が未指定の場合、最近傍三角面を自動選択
-                    refIndicesArr = FindClosestTriangleVertices(
-                        setup.targetRenderer, piercingWorldPos);
+                    refIndicesArr = FindClosestTriangleVerticesAtState(
+                        setup.targetRenderer, piercingWorldPos, setup.savedBlendShapeWeights);
                 }
 
                 resolvedRefIndices = refIndicesArr;
@@ -289,6 +296,62 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// メッシュ頂点にオフセット（位置+回転）を適用する。
+        /// ピボットは対象頂点の重心。affectedVertices で対象を制限可能。
+        /// </summary>
+        internal static void ApplyPositionOffset(
+            Mesh mesh,
+            Vector3 positionOffset,
+            Vector3 rotationEuler,
+            HashSet<int> affectedVertices = null)
+        {
+            if (positionOffset == Vector3.zero && rotationEuler == Vector3.zero)
+                return;
+
+            var vertices = mesh.vertices;
+            var rotation = Quaternion.Euler(rotationEuler);
+
+            // ピボット（回転中心）を対象頂点の重心で計算
+            var pivot = Vector3.zero;
+            int count = 0;
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                if (affectedVertices != null && !affectedVertices.Contains(i))
+                    continue;
+                pivot += vertices[i];
+                count++;
+            }
+            if (count > 0) pivot /= count;
+
+            // 回転→平行移動 を適用
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                if (affectedVertices != null && !affectedVertices.Contains(i))
+                    continue;
+                vertices[i] = rotation * (vertices[i] - pivot) + pivot + positionOffset;
+            }
+            mesh.vertices = vertices;
+        }
+
+        /// <summary>
+        /// 指定頂点セットの重心を計算する。
+        /// </summary>
+        internal static Vector3 ComputeGroupCentroid(Vector3[] vertices, HashSet<int> vertexSet)
+        {
+            var sum = Vector3.zero;
+            int count = 0;
+            foreach (int vi in vertexSet)
+            {
+                if (vi >= 0 && vi < vertices.Length)
+                {
+                    sum += vertices[vi];
+                    count++;
+                }
+            }
+            return count > 0 ? sum / count : Vector3.zero;
+        }
+
+        /// <summary>
         /// 保存済みBlendShape weightsをピアスメッシュの頂点に焼き込み、
         /// BlendShapeデータをクリアする。BakeMeshと異なりボーン変形を含まない。
         /// </summary>
@@ -332,29 +395,58 @@ namespace PiercingTool.Editor
         /// SMR のボーン変形による頂点変位をピアスメッシュに焼き込む。
         /// BlendShape の影響を除外するため、一時的にウェイトをゼロにして BakeMesh する。
         /// </summary>
+        /// <summary>
+        /// SMR の頂点位置を手動スキニングで計算し、指定 Transform のローカル空間で返す。
+        /// BakeMesh は一部のボーン構成でレンダリング結果と異なる位置を返すため使用しない。
+        /// localTransform を省略すると smr.transform を使用する。
+        /// </summary>
+        internal static Vector3[] ComputeSkinnedVerticesLocal(
+            SkinnedMeshRenderer smr, Transform localTransform = null)
+        {
+            var mesh = smr.sharedMesh;
+            var bindVerts = mesh.vertices;
+            var boneWeights = mesh.boneWeights;
+            var bindposes = mesh.bindposes;
+            var bones = smr.bones;
+            int vertCount = bindVerts.Length;
+
+            var skinMatrices = new Matrix4x4[bones.Length];
+            for (int bi = 0; bi < bones.Length; bi++)
+                skinMatrices[bi] = bones[bi] != null
+                    ? bones[bi].localToWorldMatrix * bindposes[bi]
+                    : Matrix4x4.identity;
+
+            var worldToLocal = (localTransform != null ? localTransform : smr.transform).worldToLocalMatrix;
+            var result = new Vector3[vertCount];
+
+            for (int i = 0; i < vertCount; i++)
+            {
+                var v = bindVerts[i];
+                var bw = boneWeights[i];
+                var worldPos = Vector3.zero;
+                if (bw.weight0 > 0 && bw.boneIndex0 < bones.Length)
+                    worldPos += bw.weight0 * skinMatrices[bw.boneIndex0].MultiplyPoint3x4(v);
+                if (bw.weight1 > 0 && bw.boneIndex1 < bones.Length)
+                    worldPos += bw.weight1 * skinMatrices[bw.boneIndex1].MultiplyPoint3x4(v);
+                if (bw.weight2 > 0 && bw.boneIndex2 < bones.Length)
+                    worldPos += bw.weight2 * skinMatrices[bw.boneIndex2].MultiplyPoint3x4(v);
+                if (bw.weight3 > 0 && bw.boneIndex3 < bones.Length)
+                    worldPos += bw.weight3 * skinMatrices[bw.boneIndex3].MultiplyPoint3x4(v);
+                result[i] = worldToLocal.MultiplyPoint3x4(worldPos);
+            }
+
+            return result;
+        }
+
         private static void BakeBoneDisplacement(SkinnedMeshRenderer smr, Mesh piercingMesh)
         {
             var sharedMesh = smr.sharedMesh;
-            int bsCount = sharedMesh.blendShapeCount;
 
-            // BlendShape ウェイトを一時的にゼロにしてボーン変形のみを取得
-            var savedWeights = new float[bsCount];
-            for (int i = 0; i < bsCount; i++)
-            {
-                savedWeights[i] = smr.GetBlendShapeWeight(i);
-                smr.SetBlendShapeWeight(i, 0f);
-            }
+            // 手動スキニングでボーン変形後の頂点位置を計算
+            // （BakeMesh は一部ボーン構成でレンダリングと異なる結果を返すため使用しない）
+            var bakedVerts = ComputeSkinnedVerticesLocal(smr);
 
-            var bakedMesh = new Mesh();
-            smr.BakeMesh(bakedMesh);
-            var bakedVerts = bakedMesh.vertices;
-            Object.DestroyImmediate(bakedMesh);
-
-            // ウェイトを復元
-            for (int i = 0; i < bsCount; i++)
-                smr.SetBlendShapeWeight(i, savedWeights[i]);
-
-            // ボーン変位 = BakeMesh(weights=0) - sharedMesh.vertices
+            // ボーン変位 = 手動スキニング結果 - sharedMesh.vertices（バインドポーズ）
             var bindVerts = sharedMesh.vertices;
             var verts = piercingMesh.vertices;
             bool hasDisplacement = false;
@@ -384,24 +476,9 @@ namespace PiercingTool.Editor
             SkinnedMeshRenderer smr, Mesh piercingMesh, List<int> targetVertices)
         {
             var sharedMesh = smr.sharedMesh;
-            int bsCount = sharedMesh.blendShapeCount;
 
-            // BlendShape ウェイトを一時的にゼロにしてボーン変形のみを取得
-            var savedWeights = new float[bsCount];
-            for (int i = 0; i < bsCount; i++)
-            {
-                savedWeights[i] = smr.GetBlendShapeWeight(i);
-                smr.SetBlendShapeWeight(i, 0f);
-            }
-
-            var bakedMesh = new Mesh();
-            smr.BakeMesh(bakedMesh);
-            var bakedVerts = bakedMesh.vertices;
-            Object.DestroyImmediate(bakedMesh);
-
-            // ウェイトを復元
-            for (int i = 0; i < bsCount; i++)
-                smr.SetBlendShapeWeight(i, savedWeights[i]);
+            // 手動スキニングでボーン変形後の頂点位置を計算
+            var bakedVerts = ComputeSkinnedVerticesLocal(smr);
 
             // 指定頂点のみにボーン変位を適用
             var bindVerts = sharedMesh.vertices;
@@ -895,6 +972,97 @@ namespace PiercingTool.Editor
         }
 
         /// <summary>
+        /// 指定した BlendShape ウェイトで変形したメッシュ上で、最も近い三角形の頂点を返す。
+        /// プレビュー追従の参照頂点を保存時の状態で安定的に検出するために使用する。
+        /// </summary>
+        public static int[] FindClosestTriangleVerticesAtState(
+            SkinnedMeshRenderer renderer, Vector3 piercingWorldPos, float[] blendShapeWeights)
+        {
+            var sourceMesh = renderer.sharedMesh;
+            var vertices = sourceMesh.vertices;
+            var triangles = sourceMesh.triangles;
+
+            // BlendShape デルタを適用して保存時の状態を再構成
+            if (blendShapeWeights != null)
+            {
+                int blendShapeCount = sourceMesh.blendShapeCount;
+                var deltaV = new Vector3[vertices.Length];
+                var deltaN = new Vector3[vertices.Length];
+                var deltaT = new Vector3[vertices.Length];
+
+                for (int si = 0; si < blendShapeCount && si < blendShapeWeights.Length; si++)
+                {
+                    float w = blendShapeWeights[si];
+                    if (Mathf.Abs(w) < 0.01f) continue;
+                    int fc = sourceMesh.GetBlendShapeFrameCount(si);
+                    float fw = sourceMesh.GetBlendShapeFrameWeight(si, fc - 1);
+                    if (Mathf.Abs(fw) < 0.01f) continue;
+                    sourceMesh.GetBlendShapeFrameVertices(si, fc - 1, deltaV, deltaN, deltaT);
+                    float scale = w / fw;
+                    for (int vi = 0; vi < vertices.Length; vi++)
+                        vertices[vi] += deltaV[vi] * scale;
+                }
+            }
+
+            var localPos = renderer.transform.InverseTransformPoint(piercingWorldPos);
+            return PiercingUtility.FindClosestTriangleIndices(vertices, triangles, localPos);
+        }
+
+        /// <summary>
+        /// 指定した BlendShape ウェイトで変形したメッシュ上で、最も近い2頂点を返す。
+        /// </summary>
+        public static int[] FindClosestTwoVerticesAtState(
+            SkinnedMeshRenderer renderer, Vector3 piercingWorldPos, float[] blendShapeWeights)
+        {
+            var sourceMesh = renderer.sharedMesh;
+            var vertices = sourceMesh.vertices;
+
+            if (blendShapeWeights != null)
+            {
+                int blendShapeCount = sourceMesh.blendShapeCount;
+                var deltaV = new Vector3[vertices.Length];
+                var deltaN = new Vector3[vertices.Length];
+                var deltaT = new Vector3[vertices.Length];
+
+                for (int si = 0; si < blendShapeCount && si < blendShapeWeights.Length; si++)
+                {
+                    float w = blendShapeWeights[si];
+                    if (Mathf.Abs(w) < 0.01f) continue;
+                    int fc = sourceMesh.GetBlendShapeFrameCount(si);
+                    float fw = sourceMesh.GetBlendShapeFrameWeight(si, fc - 1);
+                    if (Mathf.Abs(fw) < 0.01f) continue;
+                    sourceMesh.GetBlendShapeFrameVertices(si, fc - 1, deltaV, deltaN, deltaT);
+                    float scale = w / fw;
+                    for (int vi = 0; vi < vertices.Length; vi++)
+                        vertices[vi] += deltaV[vi] * scale;
+                }
+            }
+
+            var localPos = renderer.transform.InverseTransformPoint(piercingWorldPos);
+            int closest0 = 0, closest1 = 1;
+            float dist0 = float.MaxValue, dist1 = float.MaxValue;
+
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                float distSq = (vertices[i] - localPos).sqrMagnitude;
+                if (distSq < dist0)
+                {
+                    closest1 = closest0;
+                    dist1 = dist0;
+                    closest0 = i;
+                    dist0 = distSq;
+                }
+                else if (distSq < dist1)
+                {
+                    closest1 = i;
+                    dist1 = distSq;
+                }
+            }
+
+            return new int[] { closest0, closest1 };
+        }
+
+        /// <summary>
         /// ターゲットメッシュ上でピアス位置に最も近い2頂点のインデックスを返す。
         /// 「全体の形状を維持する」オプション用。
         /// </summary>
@@ -1197,6 +1365,611 @@ namespace PiercingTool.Editor
                 }
             }
 
+            return centroids;
+        }
+
+        // =====================================================================
+        // マルチグループモード
+        // =====================================================================
+
+        /// <summary>
+        /// 各グループの割り当て頂点・参照データをまとめた内部クラス。
+        /// </summary>
+        private class MultiGroupTransferInfo
+        {
+            public PiercingGroup group;
+            public HashSet<int> vertexSet;
+            public int[] referenceIndices;
+            public Vector3 basePiercingCenter;
+            public Vector3 barycentricCoords;
+            public float normalOffset;
+            // Chain/MultiAnchor
+            public int[][] anchorIndices;
+            public Vector3[] anchorCentroids;
+            public (int segmentIndex, float localT)[] segmentData;
+        }
+
+        /// <summary>
+        /// マルチグループモード用のメッシュ生成。
+        /// 各グループが独立した参照頂点セットを持ち、グループごとに BlendShape を転写する。
+        /// BlendShape のフレームは全グループの合算デルタを1回だけ AddBlendShapeFrame する。
+        /// </summary>
+        private static Mesh GenerateMultiGroup(PiercingSetup setup)
+        {
+            if (setup.targetRenderer == null)
+                throw new System.InvalidOperationException("対象Rendererが設定されていません。");
+
+            var sourceMesh = setup.targetRenderer.sharedMesh;
+            if (sourceMesh == null)
+                throw new System.InvalidOperationException("対象RendererにMeshが設定されていません。");
+
+            // ピアスメッシュを取得・複製
+            Mesh originalPiercingMesh = GetPiercingMesh(setup);
+            if (originalPiercingMesh == null)
+                throw new System.InvalidOperationException(
+                    "PiercingSetupと同じGameObjectにSkinnedMeshRendererまたはMeshFilterが必要です。");
+
+            var piercingMesh = Object.Instantiate(originalPiercingMesh);
+            piercingMesh.name = originalPiercingMesh.name + "_Piercing";
+
+            // ピアス側に保存済みBlendShapeがある場合、weightsを頂点に適用してBlendShapeをクリア
+            if (setup.savedPiercingBlendShapeWeights != null &&
+                setup.savedPiercingBlendShapeWeights.Length > 0 &&
+                originalPiercingMesh.blendShapeCount > 0)
+            {
+                BakePiercingBlendShapes(piercingMesh, setup.savedPiercingBlendShapeWeights);
+            }
+
+            // SMRボーン変形を頂点に焼き込む（マルチグループでは skipBoneWeightTransfer 非対応、強制的にフル焼き込み）
+            if (setup.skipBoneWeightTransfer)
+            {
+                Debug.LogWarning("[PiercingTool] マルチモードでは「ボーンウェイト転写をスキップ」は非対応です。無視して通常のボーンウェイト転写を行います。");
+            }
+            {
+                var piercingSmr = setup.GetComponent<SkinnedMeshRenderer>();
+                if (piercingSmr != null && piercingSmr.sharedMesh != null)
+                {
+                    BakeBoneDisplacement(piercingSmr, piercingMesh);
+                }
+            }
+
+            // 各グループの位置調整オフセットを適用
+            foreach (var group in setup.piercingGroups)
+            {
+                ApplyPositionOffset(
+                    piercingMesh,
+                    group.positionOffset,
+                    group.rotationEuler,
+                    new HashSet<int>(group.vertexIndices));
+            }
+
+            // 負スケール: ワインディング反転
+            if (!setup.mergeIntoTarget && setup.transform.localToWorldMatrix.determinant < 0)
+                FlipTriangleWinding(piercingMesh);
+
+            // ソースメッシュ→ピアスメッシュの座標変換行列
+            var sourceToPiercing = setup.transform.worldToLocalMatrix *
+                                   setup.targetRenderer.transform.localToWorldMatrix;
+
+            // 各グループの参照データを構築
+            var groupInfos = new List<MultiGroupTransferInfo>();
+            foreach (var group in setup.piercingGroups)
+            {
+                var info = new MultiGroupTransferInfo();
+                info.group = group;
+                info.vertexSet = new HashSet<int>(group.vertexIndices);
+
+                if (group.mode == PiercingMode.Single)
+                {
+                    // 参照頂点を解決
+                    var refIndicesArr = group.referenceVertices.ToArray();
+                    var groupWorldCenter = ComputeGroupWorldCenter(setup, group, piercingMesh);
+
+                    if (group.maintainOverallShape && refIndicesArr.Length == 0)
+                    {
+                        // 保存時のBlendShape状態で検出（現在の状態と異なる場合に誤った頂点を選ぶのを防ぐ）
+                        refIndicesArr = FindClosestTwoVerticesAtState(
+                            setup.targetRenderer, groupWorldCenter, setup.savedBlendShapeWeights);
+                    }
+                    else if (refIndicesArr.Length == 0)
+                    {
+                        refIndicesArr = FindClosestTriangleVerticesAtState(
+                            setup.targetRenderer, groupWorldCenter, setup.savedBlendShapeWeights);
+                    }
+
+                    info.referenceIndices = refIndicesArr;
+
+                    if (group.surfaceAttachment && refIndicesArr.Length == 3)
+                    {
+                        // Surface アタッチメント: バリセントリック座標と法線オフセットを計算
+                        var deformedRefPosSrc = ComputeDeformedRefPositions(
+                            setup.targetRenderer, sourceMesh, refIndicesArr, setup.savedBlendShapeWeights);
+
+                        var deformedPiercing = new Vector3[3];
+                        for (int i = 0; i < 3; i++)
+                            deformedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(deformedRefPosSrc[i]);
+
+                        // グループ内頂点の重心をピアス空間で計算
+                        var groupLocalVerts = new List<Vector3>();
+                        var piercingVerts = piercingMesh.vertices;
+                        foreach (int vi in group.vertexIndices)
+                        {
+                            if (vi >= 0 && vi < piercingVerts.Length)
+                                groupLocalVerts.Add(piercingVerts[vi]);
+                        }
+                        var groupCentroid = groupLocalVerts.Count > 0
+                            ? BlendShapeTransferEngine.ComputeCentroid(groupLocalVerts.ToArray())
+                            : BlendShapeTransferEngine.ComputeCentroid(piercingVerts);
+
+                        var bary = BlendShapeTransferEngine.ComputeBarycentricCoords(
+                            groupCentroid,
+                            deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                        var surfacePoint = bary.x * deformedPiercing[0] +
+                                           bary.y * deformedPiercing[1] +
+                                           bary.z * deformedPiercing[2];
+                        var normal = Vector3.Cross(
+                            deformedPiercing[1] - deformedPiercing[0],
+                            deformedPiercing[2] - deformedPiercing[0]);
+                        if (normal.sqrMagnitude < 1e-12f)
+                            normal = Vector3.up;
+                        else
+                            normal.Normalize();
+                        float normalOffset = Vector3.Dot(groupCentroid - surfacePoint, normal);
+
+                        info.barycentricCoords = bary;
+                        info.normalOffset = normalOffset;
+
+                        // BASE 補正
+                        CorrectPiercingToBasePositionSurface(
+                            setup.targetRenderer, sourceMesh, piercingMesh,
+                            refIndicesArr, bary, normalOffset, sourceToPiercing,
+                            setup.savedBlendShapeWeights,
+                            info.vertexSet.Count > 0 ? info.vertexSet : null);
+                    }
+                    else
+                    {
+                        // 通常の BASE 補正
+                        CorrectPiercingToBasePosition(
+                            setup.targetRenderer, sourceMesh, piercingMesh,
+                            refIndicesArr, sourceToPiercing,
+                            setup.savedBlendShapeWeights,
+                            info.vertexSet.Count > 0 ? info.vertexSet : null);
+                    }
+                }
+                else // Chain / MultiAnchor
+                {
+                    var anchorIndices = ResolveGroupAnchorIndices(group);
+                    if (anchorIndices.Length < 2)
+                    {
+                        // アンカー不足時は Single として扱うフォールバック
+                        var allTargetVerts = new List<int>();
+                        foreach (var anchor in group.anchors)
+                            allTargetVerts.AddRange(anchor.targetVertices);
+                        info.referenceIndices = allTargetVerts.ToArray();
+                        info.anchorIndices = anchorIndices;
+                        groupInfos.Add(info);
+                        continue;
+                    }
+
+                    var anchorCentroids = ComputeGroupAnchorCentroids(anchorIndices, sourceMesh.vertices, sourceToPiercing);
+                    info.anchorIndices = anchorIndices;
+                    info.anchorCentroids = anchorCentroids;
+                    info.segmentData = BlendShapeTransferEngine.ComputeSegmentTValues(
+                        piercingMesh.vertices, anchorCentroids);
+
+                    // BASE 補正（全アンカー target 頂点の重心オフセット）
+                    var allRefIndices = new List<int>();
+                    foreach (var indices in anchorIndices)
+                        allRefIndices.AddRange(indices);
+                    info.referenceIndices = allRefIndices.ToArray();
+
+                    var blendShapeOffset = ComputeBlendShapeOffsetCentroid(
+                        setup.targetRenderer, sourceMesh, allRefIndices.ToArray(),
+                        setup.savedBlendShapeWeights);
+                    if (blendShapeOffset.magnitude > 0.0001f)
+                    {
+                        var piercingOffset = sourceToPiercing.MultiplyVector(blendShapeOffset);
+                        var vertices = piercingMesh.vertices;
+                        foreach (int vi in group.vertexIndices)
+                        {
+                            if (vi >= 0 && vi < vertices.Length)
+                                vertices[vi] -= piercingOffset;
+                        }
+                        piercingMesh.vertices = vertices;
+                    }
+                }
+
+                groupInfos.Add(info);
+            }
+
+            // BlendShape 転写（全グループ合算）
+            TransferBlendShapesMultiGroup(sourceMesh, piercingMesh, groupInfos, sourceToPiercing);
+
+            // ボーンウェイト・bindpose設定
+            // マルチグループでは最初のグループの参照頂点を基準に転写
+            var firstValidRefIndices = new List<int>();
+            foreach (var info in groupInfos)
+            {
+                if (info.referenceIndices != null && info.referenceIndices.Length > 0)
+                {
+                    firstValidRefIndices.AddRange(info.referenceIndices);
+                    break;
+                }
+            }
+            var resolvedRefIndices = firstValidRefIndices.ToArray();
+
+            TransferBoneWeights(setup, sourceMesh, piercingMesh, resolvedRefIndices, sourceToPiercing);
+
+            if (!setup.mergeIntoTarget)
+            {
+                var bindposes = ComputeBindposes(setup);
+                piercingMesh.bindposes = bindposes;
+                NormalizeMeshScale(piercingMesh, setup);
+            }
+
+            return piercingMesh;
+        }
+
+        /// <summary>
+        /// マルチグループ版 BlendShape 転写。
+        /// 各グループの担当頂点にのみデルタを計算し、全グループのデルタを合算して
+        /// BlendShape フレームを 1 回だけ追加する（重複 BlendShape 名を防ぐ）。
+        /// </summary>
+        private static void TransferBlendShapesMultiGroup(
+            Mesh sourceMesh, Mesh piercingMesh,
+            List<MultiGroupTransferInfo> groupInfos,
+            Matrix4x4 sourceToPiercing,
+            float deltaThreshold = 0.0001f)
+        {
+            int sourceVertexCount = sourceMesh.vertexCount;
+            int piercingVertexCount = piercingMesh.vertexCount;
+            var piercingVertices = piercingMesh.vertices;
+            var sourceVertices = sourceMesh.vertices;
+            int blendShapeCount = sourceMesh.blendShapeCount;
+
+            // 各グループのベース位置データを事前計算
+            // Single グループ: 参照頂点ピアス空間ベース位置 + 回転ピボット
+            var groupBasePositionsPiercing = new Vector3[groupInfos.Count][];
+            var groupRotationPivots = new Vector3[groupInfos.Count];
+            // MultiAnchor グループ: アンカーごとのベース位置
+            var groupAnchorBasePiercing = new Vector3[groupInfos.Count][][];
+
+            for (int gi = 0; gi < groupInfos.Count; gi++)
+            {
+                var info = groupInfos[gi];
+                if (info.group.mode == PiercingMode.Single)
+                {
+                    if (info.referenceIndices == null || info.referenceIndices.Length == 0)
+                    {
+                        groupBasePositionsPiercing[gi] = new Vector3[0];
+                        groupRotationPivots[gi] = Vector3.zero;
+                        continue;
+                    }
+                    var basePosSrc = BlendShapeTransferEngine.ExtractPositions(
+                        sourceVertices, info.referenceIndices);
+                    var basePiercing = new Vector3[info.referenceIndices.Length];
+                    for (int i = 0; i < info.referenceIndices.Length; i++)
+                        basePiercing[i] = sourceToPiercing.MultiplyPoint3x4(basePosSrc[i]);
+                    groupBasePositionsPiercing[gi] = basePiercing;
+                    groupRotationPivots[gi] = BlendShapeTransferEngine.ComputeCentroid(basePiercing);
+                }
+                else // Chain / MultiAnchor
+                {
+                    if (info.anchorIndices == null || info.anchorIndices.Length == 0)
+                    {
+                        groupAnchorBasePiercing[gi] = new Vector3[0][];
+                        continue;
+                    }
+                    int anchorCount = info.anchorIndices.Length;
+                    groupAnchorBasePiercing[gi] = new Vector3[anchorCount][];
+                    for (int a = 0; a < anchorCount; a++)
+                    {
+                        var baseSrc = BlendShapeTransferEngine.ExtractPositions(
+                            sourceVertices, info.anchorIndices[a]);
+                        var basePiercing = new Vector3[baseSrc.Length];
+                        for (int i = 0; i < baseSrc.Length; i++)
+                            basePiercing[i] = sourceToPiercing.MultiplyPoint3x4(baseSrc[i]);
+                        groupAnchorBasePiercing[gi][a] = basePiercing;
+                    }
+                }
+            }
+
+            var srcDeltaVertices = new Vector3[sourceVertexCount];
+            var srcDeltaNormals = new Vector3[sourceVertexCount];
+            var srcDeltaTangents = new Vector3[sourceVertexCount];
+
+            for (int si = 0; si < blendShapeCount; si++)
+            {
+                string shapeName = sourceMesh.GetBlendShapeName(si);
+                int frameCount = sourceMesh.GetBlendShapeFrameCount(si);
+                float frameWeight = sourceMesh.GetBlendShapeFrameWeight(si, frameCount - 1);
+
+                sourceMesh.GetBlendShapeFrameVertices(si, frameCount - 1,
+                    srcDeltaVertices, srcDeltaNormals, srcDeltaTangents);
+
+                // 全グループのデルタを合算するバッファ
+                var piercingDeltas = new Vector3[piercingVertexCount];
+                var piercingNormalDeltas = new Vector3[piercingVertexCount];
+                var piercingTangentDeltas = new Vector3[piercingVertexCount];
+                bool anySignificant = false;
+
+                for (int gi = 0; gi < groupInfos.Count; gi++)
+                {
+                    var info = groupInfos[gi];
+                    if (info.vertexSet == null || info.vertexSet.Count == 0) continue;
+
+                    if (info.group.mode == PiercingMode.Single)
+                    {
+                        bool significant = ApplySingleGroupDelta(
+                            info, gi,
+                            sourceVertices, srcDeltaVertices,
+                            piercingVertices,
+                            groupBasePositionsPiercing[gi],
+                            groupRotationPivots[gi],
+                            sourceToPiercing,
+                            piercingDeltas,
+                            deltaThreshold,
+                            info.group.surfaceAttachment && info.referenceIndices != null && info.referenceIndices.Length == 3);
+                        if (significant) anySignificant = true;
+                    }
+                    else // Chain / MultiAnchor
+                    {
+                        if (info.anchorIndices == null || info.anchorIndices.Length < 2) continue;
+                        bool significant = ApplyMultiAnchorGroupDelta(
+                            info, gi,
+                            sourceVertices, srcDeltaVertices,
+                            piercingVertices,
+                            groupAnchorBasePiercing[gi],
+                            sourceToPiercing,
+                            piercingDeltas,
+                            deltaThreshold);
+                        if (significant) anySignificant = true;
+                    }
+                }
+
+                if (!anySignificant) continue;
+
+                piercingMesh.AddBlendShapeFrame(shapeName, frameWeight,
+                    piercingDeltas, piercingNormalDeltas, piercingTangentDeltas);
+            }
+        }
+
+        /// <summary>
+        /// Single グループのデルタを計算して piercingDeltas に加算する。
+        /// surfaceMode が true の場合は表面アタッチメント方式を使用する。
+        /// </summary>
+        private static bool ApplySingleGroupDelta(
+            MultiGroupTransferInfo info,
+            int groupIndex,
+            Vector3[] sourceVertices,
+            Vector3[] srcDeltaVertices,
+            Vector3[] piercingVertices,
+            Vector3[] basePositionsPiercing,
+            Vector3 rotationPivot,
+            Matrix4x4 sourceToPiercing,
+            Vector3[] piercingDeltas,
+            float deltaThreshold,
+            bool surfaceMode)
+        {
+            if (basePositionsPiercing == null || basePositionsPiercing.Length == 0)
+                return false;
+
+            var refIndices = info.referenceIndices;
+
+            if (surfaceMode && refIndices.Length == 3)
+            {
+                // 表面アタッチメント方式
+                var v0Base = basePositionsPiercing[0];
+                var v1Base = basePositionsPiercing[1];
+                var v2Base = basePositionsPiercing[2];
+
+                var v0Def = sourceToPiercing.MultiplyPoint3x4(
+                    sourceVertices[refIndices[0]] + srcDeltaVertices[refIndices[0]]);
+                var v1Def = sourceToPiercing.MultiplyPoint3x4(
+                    sourceVertices[refIndices[1]] + srcDeltaVertices[refIndices[1]]);
+                var v2Def = sourceToPiercing.MultiplyPoint3x4(
+                    sourceVertices[refIndices[2]] + srcDeltaVertices[refIndices[2]]);
+
+                var bary = info.barycentricCoords;
+                var baseSurface = bary.x * v0Base + bary.y * v1Base + bary.z * v2Base;
+                var baseNormal = Vector3.Cross(v1Base - v0Base, v2Base - v0Base);
+                if (baseNormal.sqrMagnitude < 1e-12f) baseNormal = Vector3.up;
+                else baseNormal.Normalize();
+                var attachBase = baseSurface + info.normalOffset * baseNormal;
+
+                var defSurface = bary.x * v0Def + bary.y * v1Def + bary.z * v2Def;
+                var defNormal = Vector3.Cross(v1Def - v0Def, v2Def - v0Def);
+                if (defNormal.sqrMagnitude < 1e-12f) defNormal = baseNormal;
+                else defNormal.Normalize();
+                var attachDef = defSurface + info.normalOffset * defNormal;
+
+                var rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                    v0Base, v1Base, v2Base, v0Def, v1Def, v2Def);
+                var translation = attachDef - attachBase;
+
+                if (translation.magnitude < deltaThreshold &&
+                    Quaternion.Angle(rotation, Quaternion.identity) < 0.01f)
+                    return false;
+
+                foreach (int vi in info.vertexSet)
+                {
+                    if (vi < 0 || vi >= piercingVertices.Length) continue;
+                    var localPos = piercingVertices[vi] - attachBase;
+                    piercingDeltas[vi] += rotation * localPos - localPos + translation;
+                }
+                return true;
+            }
+            else
+            {
+                // 通常 Single 方式（Triangle フレームまたは Davenport q-method）
+                var deformedPiercing = new Vector3[refIndices.Length];
+                var deltasPiercing = new Vector3[refIndices.Length];
+                for (int i = 0; i < refIndices.Length; i++)
+                {
+                    int idx = refIndices[i];
+                    var deformedSrc = sourceVertices[idx] + srcDeltaVertices[idx];
+                    deformedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(deformedSrc);
+                    deltasPiercing[i] = deformedPiercing[i] - basePositionsPiercing[i];
+                }
+
+                Quaternion rotation;
+                if (refIndices.Length == 3)
+                {
+                    rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                        basePositionsPiercing[0], basePositionsPiercing[1], basePositionsPiercing[2],
+                        deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                }
+                else
+                {
+                    rotation = BlendShapeTransferEngine.ComputeRigidDelta(
+                        basePositionsPiercing, deltasPiercing).rotation;
+                }
+                var translation = BlendShapeTransferEngine.ComputeCentroid(deltasPiercing);
+
+                if (translation.magnitude < deltaThreshold &&
+                    Quaternion.Angle(rotation, Quaternion.identity) < 0.01f)
+                    return false;
+
+                foreach (int vi in info.vertexSet)
+                {
+                    if (vi < 0 || vi >= piercingVertices.Length) continue;
+                    var localPos = piercingVertices[vi] - rotationPivot;
+                    piercingDeltas[vi] += rotation * localPos - localPos + translation;
+                }
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Chain/MultiAnchor グループのデルタを計算して piercingDeltas に加算する。
+        /// </summary>
+        private static bool ApplyMultiAnchorGroupDelta(
+            MultiGroupTransferInfo info,
+            int groupIndex,
+            Vector3[] sourceVertices,
+            Vector3[] srcDeltaVertices,
+            Vector3[] piercingVertices,
+            Vector3[][] anchorBasePiercing,
+            Matrix4x4 sourceToPiercing,
+            Vector3[] piercingDeltas,
+            float deltaThreshold)
+        {
+            if (anchorBasePiercing == null || anchorBasePiercing.Length < 2) return false;
+
+            int anchorCount = info.anchorIndices.Length;
+            var anchorRotations = new Quaternion[anchorCount];
+            var anchorTranslations = new Vector3[anchorCount];
+            bool anySignificant = false;
+
+            for (int a = 0; a < anchorCount; a++)
+            {
+                var deformedPiercing = new Vector3[info.anchorIndices[a].Length];
+                var deltasPiercing = new Vector3[info.anchorIndices[a].Length];
+
+                for (int i = 0; i < info.anchorIndices[a].Length; i++)
+                {
+                    int idx = info.anchorIndices[a][i];
+                    var deformedSrc = sourceVertices[idx] + srcDeltaVertices[idx];
+                    deformedPiercing[i] = sourceToPiercing.MultiplyPoint3x4(deformedSrc);
+                    deltasPiercing[i] = deformedPiercing[i] - anchorBasePiercing[a][i];
+                }
+
+                Quaternion rotation;
+                if (info.anchorIndices[a].Length == 3)
+                {
+                    rotation = BlendShapeTransferEngine.ComputeTriangleFrameRotation(
+                        anchorBasePiercing[a][0], anchorBasePiercing[a][1], anchorBasePiercing[a][2],
+                        deformedPiercing[0], deformedPiercing[1], deformedPiercing[2]);
+                }
+                else
+                {
+                    rotation = BlendShapeTransferEngine.ComputeRigidDelta(
+                        anchorBasePiercing[a], deltasPiercing).rotation;
+                }
+                var translation = BlendShapeTransferEngine.ComputeCentroid(deltasPiercing);
+                anchorRotations[a] = rotation;
+                anchorTranslations[a] = translation;
+
+                if (translation.magnitude >= deltaThreshold ||
+                    Quaternion.Angle(rotation, Quaternion.identity) >= 0.01f)
+                    anySignificant = true;
+            }
+
+            if (!anySignificant) return false;
+
+            foreach (int vi in info.vertexSet)
+            {
+                if (vi < 0 || vi >= piercingVertices.Length) continue;
+                var (seg, t) = info.segmentData[vi];
+                int a0 = seg;
+                int a1 = Mathf.Min(seg + 1, anchorCount - 1);
+
+                var pos = Vector3.Lerp(anchorTranslations[a0], anchorTranslations[a1], t);
+                var rot = Quaternion.Slerp(anchorRotations[a0], anchorRotations[a1], t);
+                var pivot = Vector3.Lerp(info.anchorCentroids[a0], info.anchorCentroids[a1], t);
+
+                var localPos = piercingVertices[vi] - pivot;
+                piercingDeltas[vi] += rot * localPos - localPos + pos;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// グループの vertexIndices からピアス空間での重心を計算する。
+        /// </summary>
+        private static Vector3 ComputeGroupLocalCentroid(PiercingGroup group, Mesh piercingMesh)
+        {
+            var verts = piercingMesh.vertices;
+            var sum = Vector3.zero;
+            int count = 0;
+            foreach (int vi in group.vertexIndices)
+            {
+                if (vi >= 0 && vi < verts.Length)
+                {
+                    sum += verts[vi];
+                    count++;
+                }
+            }
+            return count > 0 ? sum / count : BlendShapeTransferEngine.ComputeCentroid(verts);
+        }
+
+        /// <summary>
+        /// グループの重心をワールド座標で返す。
+        /// </summary>
+        private static Vector3 ComputeGroupWorldCenter(PiercingSetup setup, PiercingGroup group, Mesh piercingMesh)
+        {
+            var localCentroid = ComputeGroupLocalCentroid(group, piercingMesh);
+            return setup.transform.TransformPoint(localCentroid);
+        }
+
+        /// <summary>
+        /// グループの anchors から処理用のアンカーインデックス配列を構築する。
+        /// </summary>
+        private static int[][] ResolveGroupAnchorIndices(PiercingGroup group)
+        {
+            if (group.anchors == null || group.anchors.Count < 2)
+                return new int[0][];
+
+            var result = new int[group.anchors.Count][];
+            for (int i = 0; i < group.anchors.Count; i++)
+                result[i] = group.anchors[i].targetVertices.ToArray();
+            return result;
+        }
+
+        /// <summary>
+        /// グループ用: 各アンカーのソースメッシュ頂点からピアス空間での重心を計算する。
+        /// </summary>
+        private static Vector3[] ComputeGroupAnchorCentroids(
+            int[][] anchorIndices, Vector3[] sourceVertices, Matrix4x4 sourceToPiercing)
+        {
+            int count = anchorIndices.Length;
+            var centroids = new Vector3[count];
+            for (int i = 0; i < count; i++)
+            {
+                var basePos = BlendShapeTransferEngine.ExtractPositions(sourceVertices, anchorIndices[i]);
+                var centroid = BlendShapeTransferEngine.ComputeCentroid(basePos);
+                centroids[i] = sourceToPiercing.MultiplyPoint3x4(centroid);
+            }
             return centroids;
         }
 

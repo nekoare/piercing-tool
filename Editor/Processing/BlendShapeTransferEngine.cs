@@ -171,6 +171,10 @@ namespace PiercingTool.Editor
             Vector3 defE2 = Vector3.Cross(defNormal, defE1);
 
             // Frame rotation: base → deformed
+            // ゼロベクトルが LookRotation に渡るとログが大量に出るためガード
+            if (baseNormal.sqrMagnitude < 1e-6f || baseE2.sqrMagnitude < 1e-6f ||
+                defNormal.sqrMagnitude < 1e-6f || defE2.sqrMagnitude < 1e-6f)
+                return Quaternion.identity;
             Quaternion baseRot = Quaternion.LookRotation(baseNormal, baseE2);
             Quaternion defRot = Quaternion.LookRotation(defNormal, defE2);
 
@@ -205,7 +209,8 @@ namespace PiercingTool.Editor
             Mesh piercingMesh,
             int[] referenceIndices,
             Matrix4x4 sourceToPiercingSpace,
-            float deltaThreshold = 0.0001f)
+            float deltaThreshold = 0.0001f,
+            HashSet<int> affectedVertices = null)
         {
             var transferredNames = new List<string>();
 
@@ -278,6 +283,7 @@ namespace PiercingTool.Editor
 
                 for (int vi = 0; vi < piercingVertexCount; vi++)
                 {
+                    if (affectedVertices != null && !affectedVertices.Contains(vi)) continue;
                     var localPos = piercingVertices[vi] - rotationPivot;
                     piercingDeltas[vi] = rotation * localPos - localPos + translation;
                 }
@@ -308,7 +314,8 @@ namespace PiercingTool.Editor
             Vector3 barycentricCoords,
             float normalOffset,
             Matrix4x4 sourceToPiercingSpace,
-            float deltaThreshold = 0.0001f)
+            float deltaThreshold = 0.0001f,
+            HashSet<int> affectedVertices = null)
         {
             var transferredNames = new List<string>();
 
@@ -386,6 +393,7 @@ namespace PiercingTool.Editor
 
                 for (int vi = 0; vi < piercingVertexCount; vi++)
                 {
+                    if (affectedVertices != null && !affectedVertices.Contains(vi)) continue;
                     var localPos = piercingVertices[vi] - attachBase;
                     piercingDeltas[vi] = rotation * localPos - localPos + translation;
                 }
@@ -466,7 +474,8 @@ namespace PiercingTool.Editor
             int[][] anchorIndices,
             Vector3[] anchorCentroids,
             Matrix4x4 sourceToPiercingSpace,
-            float deltaThreshold = 0.0001f)
+            float deltaThreshold = 0.0001f,
+            HashSet<int> affectedVertices = null)
         {
             var transferredNames = new List<string>();
             int anchorCount = anchorIndices.Length;
@@ -547,6 +556,7 @@ namespace PiercingTool.Editor
 
                 for (int vi = 0; vi < piercingVertexCount; vi++)
                 {
+                    if (affectedVertices != null && !affectedVertices.Contains(vi)) continue;
                     var (seg, t) = segmentData[vi];
                     int a0 = seg;
                     int a1 = Mathf.Min(seg + 1, anchorCount - 1);
