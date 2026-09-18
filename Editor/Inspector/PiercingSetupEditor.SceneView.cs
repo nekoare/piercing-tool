@@ -909,6 +909,16 @@ namespace PiercingTool.Editor
                 return;
             }
 
+            // 頂点ピッカー有効中はハンドルを描かない。
+            // 移動ハンドルの中央/平面矩形は HandleUtility 上でピッカーの既定コントロールより
+            // 優先され、ピアス直下の頂点をクリックしてもハンドルに奪われて選択できなくなるため。
+            // デフォルトの Transform ギズモも同様にクリックを奪うので非表示のままにする。
+            if (_pickerTool != null && _pickerTool.isActive)
+            {
+                Tools.hidden = true;
+                return;
+            }
+
             var piercingWorldVerts = BakePiercingWorldVertices(setup);
             if (piercingWorldVerts == null)
             {

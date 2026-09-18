@@ -912,6 +912,10 @@ namespace PiercingTool.Editor
             if (setup.targetRenderer == null)
                 throw new System.InvalidOperationException("対象Rendererが設定されていません。");
 
+            // 保存後は頂点ピッカーのボタンが非表示になるため、動作中のピッカーはここで解除する
+            // （解除しないと保存済みの参照頂点を SceneView から書き換えられてしまう）
+            _pickerTool?.Deactivate();
+
             Undo.RecordObject(setup, "Save piercing position");
 
             // 参照頂点が未指定の場合、現在のBlendShape状態で自動選択して保存

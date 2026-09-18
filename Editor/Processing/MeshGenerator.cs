@@ -410,6 +410,16 @@ namespace PiercingTool.Editor
             var bones = smr.bones;
             int vertCount = bindVerts.Length;
 
+            // ボーン構成が揃っていない SMR（ボーン未割り当て・スキンウェイト無し・bindpose 不足）は
+            // 手動スキニングすると全頂点が原点に潰れるか IndexOutOfRange になる。
+            // Unity はこうした SMR を非スキン描画（Transform そのまま）するので、それに合わせる。
+            if (bones == null || bones.Length == 0 ||
+                boneWeights == null || boneWeights.Length != vertCount ||
+                bindposes == null || bindposes.Length < bones.Length)
+            {
+                return UnskinnedVerticesLocal(smr, bindVerts, localTransform);
+            }
+
             var skinMatrices = new Matrix4x4[bones.Length];
             for (int bi = 0; bi < bones.Length; bi++)
                 skinMatrices[bi] = bones[bi] != null
@@ -435,6 +445,24 @@ namespace PiercingTool.Editor
                 result[i] = worldToLocal.MultiplyPoint3x4(worldPos);
             }
 
+            return result;
+        }
+
+        /// <summary>
+        /// スキニングできない SMR の頂点を、Unity の非スキン描画と同じ位置で返す。
+        /// 非スキン描画では world = smr.transform × 頂点 なので、smr ローカルでは bindVerts そのもの。
+        /// localTransform が別の Transform の場合のみ座標変換する。
+        /// </summary>
+        private static Vector3[] UnskinnedVerticesLocal(
+            SkinnedMeshRenderer smr, Vector3[] bindVerts, Transform localTransform)
+        {
+            var result = (Vector3[])bindVerts.Clone();
+            if (localTransform == null || localTransform == smr.transform)
+                return result;
+
+            var toLocal = localTransform.worldToLocalMatrix * smr.transform.localToWorldMatrix;
+            for (int i = 0; i < result.Length; i++)
+                result[i] = toLocal.MultiplyPoint3x4(result[i]);
             return result;
         }
 
